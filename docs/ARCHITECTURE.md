@@ -24,48 +24,48 @@ flowchart LR
 The backend is a single FastAPI process. The frontend is a separate static SPA that talks to it
 over REST; there is no server-rendered coupling between them.
 
-**Why this stack:** FastAPI + Postgres/SQLModel + Pydantic AI (a Cerebras-hosted open-weight LLM)
-+ React, chosen together because the take-home's data is genuinely relational (a trip owns flight
-results, an itinerary, a booking log) and the brief requires free APIs — see "Why this stack, as a
-whole" and "Open-weight model (gpt-oss-120b) over OpenAI/Anthropic proprietary APIs" in
-[DECISIONS.md](DECISIONS.md) for the full reasoning, including the pros/cons against GPT/Claude.
+**Why this stack:** FastAPI + Postgres/SQLModel + Pydantic AI (with a Cerebras-hosted open-weight
+LLM) + React fit the application's relational data, transactional booking-state changes,
+tool-calling loop, and separate browser interface. See "Why this stack, as a whole" in
+[DECISIONS.md](DECISIONS.md) for the trade-offs.
 
-## Requirements → implementation
+## Capabilities → implementation
 
 - **Cheapest flights:** `FlightSearchService` (`app/services/flight_search.py`) — the one
-  implementation behind both `POST /flights/search` and the planner's `search_flights` tool —
+  implementation behind both `POST /api/trips/{trip_id}/flights/search` and the planner's
+  `search_flights` tool —
   sorts every offer ascending by `price_usd` via `trips_repository.py::cheapest_first` (shared,
   not duplicated) on every path: fresh search, own-trip TTL reuse, cross-trip cache. A backend
-  guarantee, not just provider ordering; the UI lists offers in that order, so the cheapest is
-  always shown first. The two callers differ only in `persist`/`allow_cross_trip_cache`: the route
+  invariant rather than relying only on provider ordering; the UI renders offers in the returned
+  order. The two callers differ only in `persist`/`allow_cross_trip_cache`: the route
   persists and reaches across trips, the planner tool trusts only this trip's own recent search
   and never writes offers (see "The agent has only two read-only tools" in `DECISIONS.md`).
-  `POST /flights/search` is reachable on its own, independent of `POST /trips/{id}/plan` — see
-  "Flight search is its own user-facing capability" in `DECISIONS.md` for why.
-- **Itinerary from a real API, tailored to age/fitness:** `web_search` (Tavily) grounds every
-  activity in a real, cited source; `output_type=[ToolOutput(ItineraryOut),
+  `POST /api/trips/{trip_id}/flights/search` is reachable on its own, independent of
+  `POST /api/trips/{trip_id}/plan` — see "Flight search is its own user-facing capability" in
+  `DECISIONS.md` for why.
+- **Attributed itinerary, tailored to age/fitness:** `web_search` (Tavily) supplies activity
+  research; `output_type=[ToolOutput(ItineraryOut),
   ToolOutput(ClarificationOut)]` (pinned to tool-call output rather than left on `auto`, since
   `gpt-oss-120b`'s native structured-output envelope was unreliable — see `docs/EVALS.md`) plus
   four output-validator guardrails in `app/agent/planner.py`: `reject_unsafe_intensity` ties
-  activity intensity to the traveler's fitness level, `reject_ungrounded_itinerary` rejects any
-  activity whose source URL wasn't actually returned by a real search that run,
+  activity intensity labels to the traveler's fitness level, `reject_ungrounded_itinerary` rejects
+  any activity whose source URL was not returned by web search during that run,
   `reject_optional_clarification` blocks a clarifying question that re-asks for age/fitness once
   they're already present, and `reject_flight_activities` rejects flight-shaped items masquerading
   as itinerary activities.
 - **Ask, don't assume:** genuinely ambiguous inputs (not missing ones — those are required at
   intake) produce a `ClarificationOut` instead of a guessed itinerary.
 - **Visible UI:** React SPA with a live tool-call feed and an execution panel (see below).
-- **HITL booking (bonus):** explicit confirm-then-execute clicks gate the only booking write;
+- **HITL booking:** explicit confirm-then-execute clicks gate the booking handoff;
   see "HITL booking" below for what "execute" does and doesn't do.
-- **Slack HITL connector (bonus):** an optional, DB-toggled Slack approval message with
+- **Slack HITL connector:** an optional, DB-toggled Slack approval message with
   Confirm/Reject buttons offers the same gate through Slack instead of the UI; see "Slack HITL
   connector" below.
 
 ## Architectural patterns
 
-Five patterns are enforced explicitly, each chosen over a simpler alternative for a reason named
-in [DECISIONS.md](DECISIONS.md) — this section is the map from pattern name to where it lives in
-code; DECISIONS.md has the "why this, not X" reasoning for each.
+Five patterns are used explicitly. This section maps each pattern to the code;
+[DECISIONS.md](DECISIONS.md) records the trade-offs.
 
 1. **Dependency Injection** (FastAPI `Depends`) — DB sessions (`get_session`) and external clients
    (flight provider, booking-options fetcher) are injected into route handlers, never constructed
@@ -85,14 +85,12 @@ code; DECISIONS.md has the "why this, not X" reasoning for each.
    at composition by `USE_LIVE_FLIGHT_API`. `FlightSearchService`, the route, and the planner tool
    all depend on the interface via DI and never branch on the toggle themselves.
 5. **Durable execution, not Saga** (DBOS) — `execute_booking_durable` and the planner run are
-   `@DBOS.workflow`s so a crash mid-run resumes instead of losing state. **Honest framing:** a
+   `@DBOS.workflow`s to checkpoint supported workflow steps for crash recovery. A
    single-DB booking write is already atomic (one ACID transaction + `SELECT ... FOR UPDATE`), so
    this is durable-execution for crash recovery, not classic Saga compensation — compensation
-   (release a hold, refund a charge) only becomes load-bearing once a real airline booking is
-   multi-step (hold → charge → confirm), which is out of this take-home's scope (see "Deferred by
-   design" in DECISIONS.md). `execute_booking`'s structure — an isolated external step plus an
-   isolated state transition — is deliberately shaped so adding real Saga compensation later would
-   be additive, not a rewrite.
+   (release a hold, refund a charge) would only apply to a real multi-step airline booking, which
+   this application does not perform. `execute_booking` separates the external fetch from the
+   state transition, leaving a clear extension point if the workflow grows.
 
 `FlightSearchService`/`ExecutionService` (see "Flight search and execution-run lifecycle are
 extracted services" in DECISIONS.md) are a sixth, smaller pattern in the same family — extracting
@@ -101,13 +99,13 @@ refactor-era addition once the duplication became real, not a pattern picked up 
 
 ## APIs & AI protocols
 
-**External APIs** (all free tier):
+**External APIs:**
 
 | API | Role | Adapter |
 |---|---|---|
 | Cerebras (`gpt-oss-120b`) | The planner LLM — reasoning, tool selection, structured output. | Pydantic AI `CerebrasModel`/`CerebrasProvider` in `planner.py`. |
-| SearchApi.io Google Flights | Real flight offers + booking options. | `flights_searchapi.py` (Live vs Recorded strategy). |
-| Tavily | Real, source-attributed activity research. | `activities_tavily.py`. |
+| SearchApi.io Google Flights | Flight offers and booking-option links in live mode. | `flights_searchapi.py` (Live vs Recorded strategy). |
+| Tavily | Activity-search results with source URLs. | `activities_tavily.py`. |
 | Slack (optional) | Approval message with Confirm/Reject buttons; signed callback. | `slack_hitl.py` + `routes/slack.py`. |
 
 **AI protocols:**
@@ -123,18 +121,17 @@ refactor-era addition once the duplication became real, not a pattern picked up 
 **Supporting engineering (not protocols, but load-bearing):**
 
 - **Usage limits** — `UsageLimits(tool_calls_limit=MAX_TOOL_STEPS,
-  total_tokens_limit=MAX_CONTEXT_TOKENS, request_limit=MAX_REQUESTS_PER_RUN)` bounds the loop so it
-  can't spin; `MAX_CONTEXT_TOKENS` matches gpt-oss-120b's real 30K tokens/minute limit on Cerebras.
-  A run that exceeds it degrades to an honest `PlanTooComplexOut` ("too complex for one pass")
-  instead of crashing or guessing.
+  total_tokens_limit=MAX_CONTEXT_TOKENS, request_limit=MAX_REQUESTS_PER_RUN)` bounds each loop.
+  `UsageLimitExceeded` is mapped to `PlanTooComplexOut` ("too complex for one pass"). Other
+  provider and application failures are not covered by that fallback.
 - **Rate limiting** — a per-IP request cap (`RATE_LIMIT_MAX_REQUESTS=10`/
-  `RATE_LIMIT_WINDOW_SECONDS=60` in `app/rate_limit.py`) gates `/plan` and `/flights/search`,
-  separate from the `MAX_CONCURRENT_AGENT_RUNS` concurrency slot above: the concurrency slot caps
-  simultaneous real LLM calls, this caps request *volume* per client, protecting SearchApi's
-  one-time search quota from a retry storm (accidental double-clicks, a buggy client) rather than
-  just LLM throughput.
-- **Prompt-injection guardrail** — `sanitize_web_content` wraps untrusted Tavily text in a delimited,
-  escaped block before it reaches the prompt, so embedded instructions read as data.
+  `RATE_LIMIT_WINDOW_SECONDS=60` in `app/rate_limit.py`) gates the planning and flight-search
+  routes, `POST /api/trips/{trip_id}/plan` and `POST /api/trips/{trip_id}/flights/search`, separate
+  from the `MAX_CONCURRENT_AGENT_RUNS` concurrency slot above: the concurrency slot caps
+  simultaneous LLM calls, while this caps request *volume* as observed by one process. The limiter
+  is in memory, resets on restart, and has not been verified behind a hosted reverse proxy.
+- **Prompt-injection mitigation** — `sanitize_web_content` truncates and delimits Tavily text before
+  it reaches the model. This reduces direct instruction mixing but is not a security boundary.
 - **Durable steps (DBOS)** — the planner run and booking execute are checkpointed workflows that
   resume after a crash.
 - **Observability** — `AgentRun`/`AgentRunStep` rows are derived from the real message history and
@@ -145,7 +142,7 @@ refactor-era addition once the duplication became real, not a pattern picked up 
 
 ## Request/agent flow
 
-**Planning a trip** (`POST /api/trips/{id}/plan`): `plan_trip` is idempotent per trip
+**Planning a trip** (`POST /api/trips/{trip_id}/plan`): `plan_trip` is idempotent per trip
 (`get_or_create_itinerary` returns an existing `Itinerary` row as-is). Otherwise it calls
 `run_planner_durable` (`app/dbos_runtime.py`), which acquires a concurrency slot
 (`acquire_agent_run_slot`, caps concurrent real LLM calls) and runs the `@DBOS.workflow`-wrapped
@@ -155,22 +152,23 @@ planner: `ExecutionService(session).start_run(...)` binds an `ExecutionRun` for 
 ClarificationOut` — a `ClarificationOut` returns questions without persisting an itinerary; an
 `ItineraryOut` persists and moves the trip to `ITINERARY_READY`. One level up, `dbos_runtime.py`
 catches `UsageLimitExceeded` around that call and turns it into a `PlanTooComplexOut` instead of
-letting the crash propagate, so what `run_planner_durable`/`/plan` actually return is the wider
+  letting the crash propagate, so what `run_planner_durable`/`POST /api/trips/{trip_id}/plan` actually
+  return is the wider
 `PlannerOutput` union (`ItineraryOut | ClarificationOut | PlanTooComplexOut`, `app/schemas.py`).
 Every tool call records an `ExecutionEvent`
 through the bound run, and `ExecutionRun.persist_result` (wrapping `persist_agent_run`) derives
-`AgentRun`/`AgentRunStep` rows from the real message history and usage on both the success and
-crash-recovery failure paths (never fabricated) — `ExecutionService`/`ExecutionRun`
+`AgentRun`/`AgentRunStep` rows from captured message history and usage on both the success and
+handled crash-recovery failure paths — `ExecutionService`/`ExecutionRun`
 (`app/agent/execution_log.py`) is the one place that finalizes a run, so there's exactly one
 finalization path to reason about, not two. The concurrency slot releases in a `finally`, outside
 the DBOS-wrapped call — see [DECISIONS.md](DECISIONS.md) for why that placement matters.
-`POST /flights/search` (outside the agent loop) still binds its own run through the lower-level
-`execution_context()` directly, since it isn't wrapped in a DBOS workflow.
+`POST /api/trips/{trip_id}/flights/search` (outside the agent loop) still binds its own run through
+the lower-level `execution_context()` directly, since it isn't wrapped in a DBOS workflow.
 
 **Booking a flight** (the HITL gate): a REST state machine, not an agent capability. See
 "HITL booking" below.
 
-**Watching a run**: `GET /api/trips/{id}/execution` reads every `AgentRun` with its owned
+**Watching a run**: `GET /api/trips/{trip_id}/execution` reads every `AgentRun` with its owned
 `AgentRunStep`s and `ExecutionEvent`s, shaped into `ExecutionPanelOut` with derived context usage
 and estimated cost. The response also retains the trip-wide event stream for LiveActivity; the
 execution panel renders events only inside their owning run. `GET /api/execution` is the same
@@ -195,12 +193,10 @@ regardless of what application code attempts. Deliberately relational, not a doc
 
 ![HITL booking state machine](assets/hitl-state-machine.png)
 
-`ALLOWED_TRANSITIONS` is the single source of truth; any move not listed is rejected with a 409
-and never reaches the database. `execute_booking` is the highest-value guard in the system: it
-claims the row with `SELECT ... FOR UPDATE`, re-checks state under that lock, and fetches
-booking options exactly once — a double-click from an impatient human can never trigger a second
-`booking_options` fetch or burn a second unit of the flight-search quota (see
-`test_a_concurrent_doubleexecute_books_exactly_once`). This entire state machine lives outside the agent; the agent
+`ALLOWED_TRANSITIONS` is the single source of truth; a move not listed is rejected with a 409.
+`execute_booking` claims the row with `SELECT ... FOR UPDATE`, re-checks state under that lock, and
+serializes concurrent execute requests. The database-backed concurrency test asserts that two
+simultaneous execute attempts produce one `booking_options` fetch. This state machine lives outside the agent; the agent
 can plan and search but has no tool that can move a booking's state, so "a human must click
 confirm, then execute" is structural, not a prompt instruction the model could be talked out of.
 
@@ -208,9 +204,9 @@ confirm, then execute" is structural, not a prompt instruction the model could b
 `TA-*` reference on the `HITLBookingLog` row — it's a human-confirmed booking *handoff*, not a
 real airline reservation/purchase (no PNR, no payment). Those options render as per-provider
 checkout buttons the traveler clicks through to complete the purchase on the carrier's own site,
-so no fare is ever held here; `BOOKING_TTL_MINUTES` is an internal price-freshness window, checked
+so no fare is held by this application; `BOOKING_TTL_MINUTES` is an internal price-freshness window, checked
 lazily on confirm/execute rather than by any sweeper. Completing a real purchase is out of scope
-for this take-home; see [DECISIONS.md](DECISIONS.md).
+for this project; see [DECISIONS.md](DECISIONS.md).
 
 ## Slack HITL connector (`app/adapters/slack_hitl.py`, `app/routes/slack.py`, `app/routes/connectors.py`)
 
@@ -236,21 +232,22 @@ and back the Agent execution history tab; `booking_transition` answers "what did
 decide?" and backs the Approval history tab (`GET /api/bookings` → `ApprovalHistoryPanel`, every
 booking this user requested with its transition trail). A human clicking Confirm is not agent
 execution, and keeping the decision in a trigger-enforced append-only table with actor
-attribution is a stronger guarantee than folding it into the agent's tool log.
+attribution is easier to query separately than if it were folded into the agent's tool log.
 
 Watch the agent work, live or after the fact: each run card combines metrics, model calls, tool
 calls, the structured output, and its own API/protocol activity. The output is its own
 `AgentStepKind.OUTPUT` rather than a tool call — pydantic-ai delivers a result by calling a
 synthetic `final_result_<Type>` tool, so grouping it with `search_flights`/`web_search` made the
 itinerary look like an agent tool invocation. A refused attempt is recorded `rejected`, which is
-what a retry-exhausted run looks like. Backed entirely by real persisted data
-(`agent_run`/`agent_run_step`/`execution_event`), not live in-memory state, so it reflects exactly
-what happened — including runs from before the current process started.
+what a retry-exhausted run looks like. Backed by persisted
+`agent_run`/`agent_run_step`/`execution_event` rows rather than only in-memory state, the panel can
+display captured runs from before the current process started. It is application tracing, not a
+complete distributed-observability system.
 
 ## Durable execution (DBOS)
 
-Two flows are wrapped as `@DBOS.workflow`s so a process crash mid-run resumes rather than
-silently losing state: `execute_booking_durable` (`app/dbos_runtime.py`) and the planner run
+Two flows are wrapped as `@DBOS.workflow`s to support checkpointed crash recovery:
+`execute_booking_durable` (`app/dbos_runtime.py`) and the planner run
 (`_run_planner_workflow`). DBOS reuses the app's own Postgres instance (its own `dbos` schema) —
 no additional infrastructure. Because DBOS workflows must take only serializable arguments and
 may replay their body during crash recovery, both durable entry points rebuild their

@@ -4,39 +4,29 @@ Load-bearing choices, each with the alternative and why it was rejected.
 
 ## Why this stack, as a whole
 FastAPI + Postgres/SQLModel + Pydantic AI (Cerebras-hosted `gpt-oss-120b`) + React, chosen together
-around one constraint: the take-home says "utilize the free available APIs," and every real
-requirement — cheapest-flight comparison, an activity itinerary, HITL booking — is data that's
-genuinely relational (a trip owns flight results, an itinerary, a booking log) and needs real
-transactions for the booking state machine's `SELECT ... FOR UPDATE` guarantee. Postgres was the
-one piece of infra that could serve both the app's data model and DBOS's durability layer without
-standing up a second system (see "PostgreSQL over a NoSQL store" below). FastAPI + Pydantic AI
-were picked for the same reason as the LLM host itself: Pydantic AI is a swappable provider layer,
-not a wrapper around one vendor's SDK, which is what made the Groq → Cerebras swap a same-afternoon
-change instead of a rewrite (see "Cerebras-hosted open-weight model" below) — betting the whole
-stack on one vendor's proprietary client would have made that kind of swap much more expensive.
-Every other piece (SearchApi.io, Tavily, React/Vite/Tailwind) was picked the same way each
-individual entry below explains: real structured data over scraping, and the simplest tool that
-does the job without adding a dependency the take-home doesn't need.
+for a relational application that calls replaceable external providers. Trips own flight results,
+itineraries, and booking logs, while booking-state changes need transactions and row locking.
+Postgres was the one piece of infrastructure that could serve both the app's data model and
+DBOS's durability layer without standing up a second system (see "PostgreSQL over a NoSQL store"
+below). FastAPI + Pydantic AI were picked for the same reason as the LLM host itself: Pydantic AI
+is a swappable provider layer,
+not a wrapper around one vendor's SDK; that boundary allowed the model host to change without
+rewriting the planner (see "Cerebras-hosted open-weight model" below). The entries below document
+the narrower trade-offs behind each remaining dependency.
 
 ## PostgreSQL over a NoSQL store
 The datastore is Postgres 16, not a document/NoSQL store (MongoDB, DynamoDB, Firestore).
-**Alternative:** a document store — schemaless, and often pitched as faster to stand up for a
-quick prototype. **Rejected** — this system's data is genuinely relational (a trip owns flight
-results, an itinerary, a booking log; a booking owns its transition history; an agent run owns
-its steps), and the booking FSM's core safety guarantee — `SELECT ... FOR UPDATE` plus an audit
-write in the same ACID transaction (see "HITL booking is a REST state machine" above) — needs
-real multi-statement transactions, which most NoSQL stores either don't offer or bolt on
-awkwardly. The append-only audit tables' `BEFORE UPDATE/DELETE` trigger and the `NOT NULL`
+**Alternative:** a document store. **Rejected** — this system's data is relational (a trip owns
+flight results, an itinerary, and a booking log; a booking owns its transition history; an agent
+run owns its steps), and the booking FSM uses `SELECT ... FOR UPDATE` plus an audit write in the
+same transaction (see "HITL booking is a REST state machine" above). The append-only audit tables'
+`BEFORE UPDATE/DELETE` trigger and the `NOT NULL`
 constraint on age/fitness (see "Age and fitness level are mandatory intake fields" above) are both
-schema-level guarantees a schemaless store can't enforce the same way. **Chosen because:**
-Postgres is a versatile fit for structured, relational, transactional data like this take-home's
-domain; familiarity from a personal project and from production use at a previous early-stage AI
-startup (via Postgres-based BaaS platforms — Supabase, Neon) removed any ramp-up risk; and
-system-wise, it let DBOS (the durable-execution layer) reuse this exact same instance in its own
+database constraints used by this implementation. **Chosen because:** Postgres fits the structured,
+transactional data and lets DBOS reuse the same instance in its own
 `dbos` schema instead of standing up a second database just for durability (see "DBOS for durable
-execution" below). Hosted Postgres also closes the old "NoSQL provisions faster" gap — instant
-provisioning and a generous free tier on Supabase/Neon came without giving up any relational
-guarantees.
+execution" below). Hosted Postgres remains a deployment option, but no provider or service tier is
+assumed by the architecture.
 
 ## Dependency Injection over constructing dependencies inline
 DB sessions and external clients (`FlightProvider`, `ActivityProvider`, the booking-options
@@ -65,8 +55,8 @@ confirmed first" a prompt-dependent hope; a state machine outside the agent make
 the agent has no tool that can move booking state.
 
 ## Agent output is a union: `Itinerary | ClarificationOut`
-A genuinely ambiguous input (e.g. a destination name that could mean more than one place) produces
-real clarifying questions, not a guessed itinerary. **Alternative:** always return an itinerary and
+A genuinely ambiguous input (e.g. a destination name that could mean more than one place) can
+produce clarifying questions instead of an itinerary. **Alternative:** always return an itinerary and
 let the prompt beg the model to ask. **Rejected** — "ask, don't assume" as a type is enforced by
 validation; as prose it's optional. Age/fitness level used to be the main trigger for this path
 until they became mandatory at trip intake (see the "mandatory intake fields" note below) — the
@@ -76,25 +66,26 @@ union stays for whatever's still genuinely ambiguous.
 `TripRequestCreate.age`/`.fitness_level` are required, not optional-then-clarified. **Alternative:**
 keep them optional and let the agent's `ClarificationOut` path ask when missing (the original
 design). **Rejected** — every itinerary needs them to pace activities, so the clarify-then-resubmit
-round trip was guaranteed on nearly every real trip; validating at intake removes that round trip
-entirely instead of just making it reliable. `TripRequest.age`/`.fitness_level` are now `NOT NULL`
+round trip was required whenever either field was missing; validating at intake removes it.
+`TripRequest.age`/`.fitness_level` are now `NOT NULL`
 in the DB too (migration `12c1788c`) — a nullable column let a handful of legacy rows carry no
 age/fitness, and `reject_optional_clarification` blocks any clarifying question that mentions
 "age"/"fitness" once other trip details are present, so a genuinely-null row trapped the model
 asking for the one thing it wasn't allowed to ask about, burning all 3 output retries. Closing the
-nullability gap fixes that structurally instead of special-casing the validator. The 210 affected
-legacy rows kept their append-only audit history and got a neutral placeholder backfilled; the 2
-with no audit trail were dropped.
+nullability gap fixes that structurally instead of special-casing the validator. The migration
+backfills legacy rows that have audit history and removes legacy rows that do not.
 
 ## Flight search is its own user-facing capability, not gated behind full itinerary generation
-`POST /flights/search` lets a user look up real flight offers for a trip directly, independent of
-`POST /trips/{id}/plan`. **Alternative:** only expose flight search as the agent's internal
-`search_flights` tool, reachable solely by triggering full itinerary generation. **Rejected** —
+`POST /api/trips/{trip_id}/flights/search` lets a user look up flight offers for a trip directly,
+independent of `POST /api/trips/{trip_id}/plan`. **Alternative:** only expose flight search as the
+agent's internal `search_flights` tool, reachable solely by triggering full itinerary generation.
+**Rejected** —
 flights and itineraries are different asks with different costs: a flight lookup is one
 deterministic SearchApi call, while planning drives the whole agent loop (Cerebras reasoning,
 `web_search`, output validation) — slower, and it spends real, rate-limited LLM quota
 (`MAX_CONCURRENT_AGENT_RUNS` caps concurrent *LLM* calls specifically; see `app/rate_limit.py`, and
-note `/flights/search` doesn't compete for that slot the way `/plan` does). Forcing a user who just
+note the flight-search route does not compete for that slot the way the planning route does).
+Forcing a user who just
 wants prices through the full planning path would burn that scarce budget on a task that never
 needed an LLM at all. **Reflected in the two callers' cache behavior, not just the route split:**
 the direct route persists results and reuses them across trips (`persist=True,
@@ -105,11 +96,12 @@ logic actually lives.
 
 ## Flight search and execution-run lifecycle are extracted services, not inline route/tool logic
 `FlightSearchService` (`app/services/flight_search.py`) and `ExecutionService`/`ExecutionRun`
-(`app/agent/execution_log.py`) sit behind `POST /flights/search`, the planner's `search_flights`
-tool, and the DBOS-wrapped planner run. **Alternative:** leave the caching/persistence/ordering
-logic inline in `routes/trips.py` and `agent/planner.py`, as it originally was. **Rejected** — the
+(`app/agent/execution_log.py`) sit behind `POST /api/trips/{trip_id}/flights/search`, the
+planner's `search_flights` tool, and the DBOS-wrapped planner run. **Alternative:** leave the
+caching, persistence, and ordering logic inline in `routes/trips.py` and `agent/planner.py`, as it
+originally was. **Rejected** — the
 route and the planner tool need the *same* cheapest-first/cache/round-trip-completeness behavior
-(same-trip TTL reuse, cross-trip identical-search reuse, honest-unavailable degradation) and had
+(same-trip TTL reuse, cross-trip identical-search reuse, explicit unavailable results) and had
 drifted into two near-duplicate implementations; one service parameterized by
 `persist`/`allow_cross_trip_cache` is the single place that logic can be verified once
 (`test_route_and_planner_tool_modes_agree_on_offer_ordering_and_shape` pins the two callers can't
@@ -161,92 +153,64 @@ re-enters the workflow body during replay, so mutating in-process state *inside*
 acquire uses a lock-guarded counter, not `asyncio.wait_for(sem.acquire(), timeout=0)`, which can
 spuriously time out even uncontended.
 
-## Open-weight model (gpt-oss-120b) over OpenAI/Anthropic proprietary APIs
-The planner runs OpenAI's open-weight `gpt-oss-120b`, hosted by Cerebras — not GPT-4o/GPT-5 via
-OpenAI's own API, and not Claude via Anthropic's own API. **Alternative:** either proprietary
-frontier API. **Rejected for this deliverable, for two compounding reasons:**
+## Cerebras-hosted open-weight model
+The planner uses `gpt-oss-120b` through Pydantic AI's `CerebrasModel`. The choice met the project's
+development-budget and context-window needs when it was selected. Pydantic AI keeps provider-specific
+construction at the application boundary, and the earlier Groq-to-Cerebras change did not require
+rewriting the planner or its tools.
 
-1. **The brief requires free APIs, and neither proprietary API has a free tier that fits.** Both
-   OpenAI and Anthropic are pay-per-token with no sustained free tier suitable for a multi-tool-call
-   agent loop exercised repeatedly during development and re-run for evals (`--repeat k`) — trial
-   credits cover a demo, not an iteration cycle. Cerebras's free tier (30,000 tokens/minute, see
-   below) is what let itinerary generation, prompt iteration, and the eval suite all run at zero
-   marginal cost. Pricing changes over time; check each provider's current page before treating
-   these specific numbers as current (see the same caveat on the SearchApi/Tavily entries below).
-2. **An open-weight model decouples "which model" from "which host."** Because `gpt-oss-120b`'s
-   weights are open, any inference provider can serve them — this project already exercised that
-   directly: the Groq → Cerebras swap (below) was a same-afternoon config change, only possible
-   because Pydantic AI was chosen as a swappable provider layer rather than the planner being
-   written against one vendor's client (see "Why this stack, as a whole" above). GPT-4o/GPT-5 and
-   Claude are each reachable only through their own vendor's API (or that vendor's own limited
-   platform partners — Bedrock/Vertex/Foundry for Claude, Azure for OpenAI) — there is no second,
-   independent host to swap to if pricing, rate limits, or availability change. Choosing an
-   open-weight model preserves that optionality; a proprietary model doesn't.
-
-**What would make the proprietary alternative the right call:** neither of these reasons is a
-claim that OpenAI's or Anthropic's models are worse. Both have materially more mature, longer-proven
-function-calling and structured-output support than a model served through a newer inference host,
-and a funded production deployment (not a free-tier take-home) would reasonably weigh that maturity
-and a single vendor's operational predictability (SLAs, rate-limit stability) above the swappability
-argument above. The trade-off here is specific to this deliverable's constraints, not a general
-claim that open-weight beats proprietary.
+This is not a benchmark claim that an open-weight model or Cerebras is generally better than a
+proprietary model or another host. Model quality, structured-output behavior, rate limits, pricing,
+and support need to be evaluated for the intended deployment. Those provider conditions can change
+independently of this repository.
 
 ## Cerebras over Groq (over Gemini)
 Cerebras runs `gpt-oss-120b` directly through Pydantic AI's native `CerebrasModel`/
 `CerebrasProvider`. The model name lives in `config.py::CEREBRAS_MODEL`, and the app reads
 `CEREBRAS_API_KEY` from settings. **Alternative 1:** Groq, also serving `gpt-oss-120b`.
-**Rejected** — Groq's free tier caps at 8,000 tokens/minute, which crashed multi-tool-call planner
-runs with HTTP 413 "request too large" rate-limit errors; Cerebras's free tier gives 30,000
-tokens/minute for the same model, so itinerary generation completes end-to-end. **Alternative 2:**
+**Rejected** — the available Groq account returned HTTP 413 rate-limit errors during multi-tool-call
+runs, while the available Cerebras limits allowed the tested itineraries to complete. These are
+observations from development, not current plan guarantees. **Alternative 2:**
 `llama-3.3-70b-versatile`. **Rejected** — it emits its native `<function=...>` text format instead
 of JSON tool calls, which Pydantic AI can't parse.
 
 ## SearchApi.io over Amadeus/Duffel/Skyscanner/raw scraping, for flights
 `flights_searchapi.py` calls SearchApi.io's Google Flights engine. **Alternative 1:** Amadeus or
-Duffel — enterprise flight APIs with real booking capability. **Rejected** — both gate access
-behind a business/partner approval process, which doesn't fit a take-home's signup-and-go
-timeline. **Alternative 2:** scrape Google Flights directly. **Rejected** — no stable schema, no
-free-tier guarantee, and fragile to markup changes. **Chosen because:** free tier at signup,
-Google Flights data already normalized into structured JSON, and the response's `best_flights`
-array is pre-ranked cheapest-first by SearchApi.io itself — the app's own `cheapest_first`
-guarantee (see "Cheapest flights" in [ARCHITECTURE.md](ARCHITECTURE.md)) reinforces this rather
-than building price-sort/filter logic from scratch against raw, unranked results.
+Duffel. **Not selected:** their access and product scope did not fit the project's account and
+budget constraints at selection time. **Alternative 2:** scrape Google Flights directly.
+**Rejected:** markup is not a stable application interface. **Chosen because:** SearchApi returns
+structured Google Flights responses, including ranked flight arrays. The application still applies
+its own `cheapest_first` ordering rather than relying only on provider order. Provider access,
+pricing, response shape, and ranking behavior must be rechecked before deployment.
 
 ## Tavily over Serper/Bing/SerpAPI/Google Custom Search, for activity research
 `activities_tavily.py` calls Tavily for the itinerary's activity research. **Alternative:**
-general-purpose search APIs (Serper, Bing Search API, SerpAPI, Google Custom Search) — cheaper or
-more familiar, but return raw SERPs (titles/snippets/links) that need extra parsing before an LLM
-can use them reliably. **Rejected** — that parsing step is exactly the kind of brittle scraping
-this project's "real data only, honest degradation" principle (below) tries to avoid. **Chosen
-because:** Tavily is purpose-built for LLM agents — free tier at signup, and results come back
-already shaped for grounding a model's output (clean content + source URL per result), which is
-what `web_search`'s citation requirement (every activity cites a real URL) needs directly.
+general-purpose search APIs (Serper, Bing Search API, SerpAPI, Google Custom Search), which expose
+different result shapes and would require a different adapter. **Chosen because:** Tavily returns
+content and a source URL per result in a shape the `web_search` tool can pass to the model. The
+output validator checks URL attribution only; it does not independently verify the activity text.
 
-## Real data only, honest degradation
-Adapters never fabricate. On quota/rate-limit/empty they return cached real data if present, or an
-honest `unavailable_reason` — never an invented offer or activity. Booking-options fetches
+## Provider data and explicit degradation
+The flight adapters normalize provider or recorded-fixture responses; they do not synthesize
+fallback offers. On quota, rate-limit, or empty responses they return cached provider data when
+available or an `unavailable_reason`. Activities are generated by the model from search results,
+so their source URLs provide attribution rather than independent factual verification. Booking-options fetches
 (`departure_id`/`arrival_id`/`outbound_date` forwarded alongside `booking_token`, all derived from
 the flight's stored `raw_offer`) work end-to-end for one-way and round-trip alike. Round-trip
 offers store a `departure_token`, not a real `booking_token` (see `_parse_offers`); resolving it
 costs one extra SearchApi call (`_resolve_return_booking_token`) that fetches the return-leg
 options and picks the cheapest — the current UI has no separate return-flight-selection step, so
 this is the same cheapest tie-break the rest of the app already uses. Any failure in that
-resolution degrades honestly to no booking links, same as the rest of the booking-options path.
+resolution returns no booking links, matching the rest of the booking-options failure path.
 
 ## Custom Slack HITL adapter over chat-sdk-python
 `app/adapters/slack_hitl.py` hand-rolls signature verification (stdlib `hmac`/`hashlib`) and Block
 Kit message building for one outbound POST and one signed callback. **Alternative:**
-[`chat-sdk-python`](https://github.com/Chinchill-AI/chat-sdk-python), a multi-platform (Slack,
-Discord, Teams, Telegram, WhatsApp, and more) async chat SDK — trustworthy prior art, built by a
-former colleague (30+ years as a SWE, enterprise background) from a previous role, with its own
-tested Slack webhook verifier and cross-platform `Card`/`Button` model already covering this exact
-surface. **Rejected for this
-deliverable** — pulling in a 9-platform, alpha-status SDK for a single Slack button is more
-integration risk than the feature warrants, and hand-rolling the ~30-line HMAC check against
-Slack's own documented example is a clearer demonstration of understanding the protocol than
-depending on an abstraction over it. **Kept as the deliberate extension point:** `notify_pending_approval`/`resolve_approve`/`resolve_reject` are isolated behind `slack_hitl.py`'s
-narrow interface specifically so that a real multi-connector future (Discord, Teams, ...) is a
-module swap to `chat-sdk-python`, not a rewrite — see `docs/SLACK_SETUP.md`.
+a multi-platform chat SDK. **Rejected:** the current integration needs one Slack message and one
+signed callback, so adding a broader connector abstraction would increase the dependency and
+configuration surface without serving another implemented connector. The
+`notify_pending_approval`/`resolve_approve`/`resolve_reject` boundary keeps Slack-specific code
+isolated if another connector is added later.
 
 **Local dev needs a public callback URL.** Slack's Interactivity config can't POST to
 `localhost`, so `POST /api/slack/interactions` has to be reachable from the internet even during
@@ -261,13 +225,12 @@ to `SEARCHAPI_TIMEOUT_SECONDS`, well past that budget; a fire-and-forget execute
 Slack handler would leave Slack with no reliable way to report back whether it actually succeeded.
 Execute stays a synchronous action behind the frontend's existing Execute button, where the UI
 already discloses ("your flight hasn't been purchased") what execute does and doesn't do.
-**What this means for the approver:** clicking Approve in Slack *is* the real human-in-the-loop
+**What this means for the approver:** clicking Approve in Slack records the human-in-the-loop
 decision — it moves the booking `PENDING_USER_CONFIRMATION → CONFIRMED` — but it doesn't hand back
 checkout links; whoever approved still has to open the app and click Execute to get them. That's a
-genuine two-step, two-surface flow today, not a cosmetic gap. **Production fix, not built here:**
+two-step, two-surface flow. **Possible extension:**
 ack Slack immediately, run execute as a background job, and post a follow-up Slack message with the
-checkout links once it completes — deferred because one workspace and one approval button didn't
-justify standing up an async job runner for it yet.
+checkout links once it completes.
 
 ## Connector enablement is a DB-backed toggle, not just an env var
 `connector_setting.slack_enabled` is a single-row table flipped via `/api/connectors`, separate
@@ -296,25 +259,18 @@ cheap. The one thing kept server-side either way: user-scoping, since that's a s
 not a display preference.
 
 ## Rate limiting protects scarce third-party quota
-`enforce_request_rate_limit` (`app/rate_limit.py`) applies a per-IP request cap plus a global
-concurrency cap on real LLM calls, gating `/plan` and `/flights/search`. **Alternative:** no
-limiting, rely on each provider's own rate-limit response. **Rejected** — SearchApi's free tier
-is a one-time search allotment, not a renewing rate limit, so a burst of retries (accidental
-double-clicks, a buggy client) would permanently burn quota rather than just wait out a window;
-limiting at the app boundary protects that budget before a request ever reaches SearchApi.
+`enforce_request_rate_limit` (`app/rate_limit.py`) applies a per-IP request cap plus a process-local
+concurrency cap on real LLM calls, gating `POST /api/trips/{trip_id}/plan` and
+`POST /api/trips/{trip_id}/flights/search`. **Alternative:** no
+limiting, rely on each provider's own rate-limit response. **Rejected** — a burst of retries
+(accidental double-clicks or a buggy client) can consume provider quota before the upstream limit
+responds. This limiter reduces that risk for one running process; it resets on restart and is not
+a distributed quota-control mechanism.
 
-## Added vs. deferred, to stay in scope
-Two things were added **beyond** the take-home's minimum ask, deliberately, as scoped "strong
-plus" bonuses: HITL booking (see "HITL booking is a REST state machine" above) and the optional
-Slack connector (see "Custom Slack HITL adapter" below) — both explicitly named in the take-home
-brief as differentiators, not required. Both were kept narrow on purpose (booking is a *handoff*,
-not a real purchase; Slack is one workspace, one button, hand-rolled instead of a multi-platform
-SDK) so the bonus demonstrates the pattern without ballooning into a second project.
+## Current scope and deferred work
+HITL booking is a checkout-link handoff, not a purchase. The optional Slack connector supports one
+workspace and one approval interaction rather than a general chat-platform abstraction.
 
-Everything below was considered and **deferred**, not attempted-and-abandoned — each pays off
-across many sessions or needs infrastructure a take-home doesn't have, and building it now would
-be scope creep against the actual ask: episodic/semantic/procedural agent memory, full auth (only
-`get_current_user` changes to support it later), payment processing, and Saga-style compensation
-for a multi-step real airline booking (see "Durable execution, not Saga" in `ARCHITECTURE.md`).
-Trap-doors are left where they'd slot in, so "deferred" means a known extension point, not a gap
-nobody thought about.
+Not implemented: authentication, multi-user isolation, payment processing, episodic/semantic/
+procedural agent memory, or Saga compensation for a multi-step airline booking. Some code boundaries
+could support those changes, but their implementation effort and behavior have not been validated.

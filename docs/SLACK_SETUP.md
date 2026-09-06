@@ -4,11 +4,7 @@ One-time steps to enable the optional Slack approval connector. Nothing here is 
 the app to run — without these env vars, the Connectors tab shows the Slack toggle greyed out
 and the app behaves exactly as it does today.
 
-For this project workspace, the Slack app is already registered and installed. You only need
-to put the resulting token, signing secret, and channel ID into `backend/.env`, restart the
-backend, then enable Slack in the Connectors tab.
-
-For a fresh workspace:
+To configure a workspace:
 
 1. Create an app at <https://api.slack.com/apps> in your workspace.
 2. **OAuth & Permissions** → Bot Token Scopes → add `chat:write`. Click **Install to
@@ -37,12 +33,7 @@ For a fresh workspace:
 ## Why this adapter is intentionally narrow
 
 `app/adapters/slack_hitl.py` hand-rolls Slack signature verification and Block Kit message
-building because the deliverable only needs one Slack approval message and one signed callback.
-That keeps the protocol easy to explain in a take-home review.
-
-If this grows into multiple chat connectors, the planned swap is
-[`chat-sdk-python`](https://github.com/Chinchill-AI/chat-sdk-python): trusted prior work from a
-former Chinchill-AI colleague with 30+ years of enterprise SWE experience. It already has Slack
-webhook verification and cross-platform card/button primitives, so Discord, Teams, and other
-chat surfaces should be a module swap around the current `notify_pending_approval` /
-`resolve_approve` / `resolve_reject` boundary rather than a rewrite.
+building because the implemented scope is one Slack approval message and one signed callback.
+Adding a multi-platform abstraction would increase the dependency and configuration surface
+without serving another current connector. The `notify_pending_approval`, `resolve_approve`, and
+`resolve_reject` boundary keeps the Slack-specific code isolated if that scope changes.

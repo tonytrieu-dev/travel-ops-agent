@@ -1,24 +1,31 @@
 # Travel Agent
 
-An AI travel-planning agent: give it an origin, destination, dates, age, and fitness level, and
-it searches real flights, researches real activities, and builds a fitness-tailored day-by-day
-itinerary. Required fields are validated at intake so the agent never guesses at missing trip
-data; it only asks a clarifying question when a *provided* value is genuinely ambiguous (e.g. a
-destination name that could mean more than one place). A strict **human-in-the-loop** gate sits
-between any plan and any booking action: the agent can research and propose flights but has no
-booking capability of its own — a person must explicitly review and approve before anything
-moves forward.
+An AI travel-planning application that searches flight data, researches destination activities,
+and generates an age- and fitness-aware itinerary. Required trip fields are validated at intake,
+while ambiguous values can produce a clarifying question instead of an itinerary. A
+**human-in-the-loop** state machine keeps booking handoff outside the agent: the model can research
+and propose flights, but it has no tool that can approve or execute booking state changes.
+
+## Project status and limitations
+
+This is a portfolio and reference implementation intended for local development and evaluation.
+It is not a production travel service and has not been load tested or security audited. There is
+no authentication: every request currently uses the same demo account, so the application must
+not be exposed as an unrestricted public service. Activity citations show that a URL came from the
+configured search provider; they do not independently verify every generated claim. The booking
+flow returns third-party checkout links and does not reserve, purchase, or hold a fare.
+
+See [Operational boundaries](docs/EVALS.md#operational-boundaries) for the detailed runtime,
+security, recovery, and integration limitations.
 
 ## What it does
 
 1. **Plan a trip** — origin, destination, dates, age, and fitness level are all required at
-   intake, so the agent always has what it needs to pace the itinerary without guessing. It still
-   asks a clarifying question if a provided value is genuinely ambiguous.
-2. **Search real flights** — Google Flights results via SearchApi.io, cached by route+date to
-   protect a one-time search quota.
-3. **Get a real itinerary** — the agent researches activities via Tavily web search and returns
-   a day-by-day plan where every activity cites the real source URL it came from. No invented
-   activities, no fabricated data.
+   intake. It can still ask a clarifying question if a provided value is ambiguous.
+2. **Search flights** — SearchApi.io Google Flights results in live-provider mode, with
+   route-and-date caching; recorded fixtures are available for repeatable tests and evals.
+3. **Generate an attributed itinerary** — the agent researches activities through Tavily and
+   returns a day-by-day plan. Each activity must cite a URL returned by that run's web search.
 4. **Human-approved booking handoff** — review a proposed flight, explicitly approve it, then
    retrieve real checkout links, as three separate steps. Nothing here books a flight. Approval
    unlocks a deterministic, audited workflow whose output is airline/OTA checkout links with the
@@ -27,33 +34,30 @@ moves forward.
    fare is actually held, a 30-minute freshness window guards against handing you a stale price:
    approving or executing past it marks the booking `EXPIRED` and asks you to search again.
 5. **Watch the agent work** — an execution panel shows every run's tool calls, token usage,
-   context-budget utilization, and timing, live. It's global across all of your trips (filterable
+   context-budget utilization, and timing. It's global across all of your trips (filterable
    by route and status), not just the one you're currently planning. A separate "Approval history"
    tab shows the other half of the audit trail: every human decision on a booking — who approved
    what and when — read straight from the append-only `booking_transition` table.
 6. **Revisit any past trip** — a "Your trips" tab lists everything you've created, newest first
-   and filterable by date range, so a trip never disappears just because a newer one replaced it
-   as the active one in the planner.
+   and filterable by date range. Trips remain in Postgres until their rows are removed.
 
 ## Stack
 
 - **Backend:** FastAPI, Pydantic AI, SQLModel/asyncpg, PostgreSQL 16, Alembic, DBOS (durable
   workflow execution, reuses the same Postgres instance).
 - **LLM:** Cerebras `gpt-oss-120b` via Pydantic AI.
-- **Flights:** SearchApi.io Google Flights (structured JSON; free tier at signup time, see
-  [searchapi.io/pricing](https://www.searchapi.io/pricing)).
-- **Activities:** Tavily web search (free tier at signup time, see
-  [tavily.com/#pricing](https://www.tavily.com/#pricing)).
+- **Flights:** SearchApi.io Google Flights structured responses, or recorded fixtures.
+- **Activities:** Tavily web search.
 - **Frontend:** React 19 + Vite + Tailwind CSS v4, TypeScript. A structured trip form drives the
   agent; a live activity feed streams its tool calls inline on the trip page, and a separate
   execution panel shows the full run trace across every trip. A "Your trips" tab lists every trip
-  you've created, so switching or revisiting one never loses its history.
+  persisted for the demo account.
 - **Evals:** `pydantic-evals` — deterministic scoring by default, with optional LLM-judged
   fitness-appropriateness scoring, separate from the pytest suite that gates system correctness.
 
-All three external services offer a free tier as of this writing; check each provider's current
-pricing page before relying on exact quota numbers, which change over time. For why each one was
-picked over its alternatives, see [DECISIONS.md](docs/DECISIONS.md).
+Live-provider operation requires accounts and API credentials for the configured services.
+Availability, pricing, and quotas are controlled by those providers and can change. For why each
+provider was selected, see [DECISIONS.md](docs/DECISIONS.md).
 
 ## Running it
 
@@ -116,10 +120,12 @@ uv run python -m evals.run --repeat 3
 uv run python -m evals.run --with-judge
 ```
 
-Scores the agent (not just the system) against a small dataset: are cited activities grounded in
-real search results, are flights searched exactly once, and is the itinerary safe for the
-traveler? The default suite is deterministic; `--with-judge` opts into the Gemini
-`FitnessAppropriateness` evaluator. Runs against the real Cerebras API, so it spends real quota.
+Scores the agent against a small dataset: do activity URLs come from the recorded search results,
+does the run follow the expected tool-call trajectory, and do low-fitness cases avoid activities
+labeled `high` intensity? These checks cover specific output properties; they do not establish
+overall itinerary correctness or traveler safety. The default suite is deterministic;
+`--with-judge` opts into the Gemini `FitnessAppropriateness` evaluator. The planner model call is
+live in both modes, so running evals consumes Cerebras quota.
 
 ### 7. (Optional) Slack human-in-the-loop approvals
 
@@ -137,7 +143,6 @@ toggle greyed out and booking approval stays in-app.
 
 ## Key decisions
 
-Every load-bearing choice in this project — HITL as a REST state machine, ask-don't-assume typing,
-real-data-only degradation, DBOS for durable execution, the append-only audit trail, rate limiting,
-and why each external API was picked over its alternatives — is documented with its reasoning in
+The reasoning behind the REST state machine, typed outputs, provider failure handling, DBOS
+workflows, append-only audit tables, request limits, and provider choices is documented in
 [docs/DECISIONS.md](docs/DECISIONS.md).

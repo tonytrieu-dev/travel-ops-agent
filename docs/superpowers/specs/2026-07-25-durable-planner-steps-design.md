@@ -63,4 +63,3 @@ Full existing suite (124 backend tests) must stay green; this is purely additive
 
 - `docs/ARCHITECTURE.md` — "Durable execution (DBOS)" section currently documents per-call replay risk as a known, accepted limitation; update to describe the three step boundaries instead.
 - `docs/DECISIONS.md` — same, in its DBOS section.
-- `Users/tony/Desktop/Travel_Agent_Enterprise_Onboarding/Travel_Agent_Enterprise_Onboarding.md` - meta-doc
