@@ -1,4 +1,4 @@
-# Travel Agent
+# TravelOps Agent
 
 An AI travel-planning application that searches flight data, researches destination activities,
 and generates an age- and fitness-aware itinerary. Required trip fields are validated at intake,
