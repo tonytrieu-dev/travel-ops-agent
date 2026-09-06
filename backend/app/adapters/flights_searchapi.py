@@ -193,12 +193,12 @@ class LiveSearchApiProvider:
         if return_date is None:
             return FlightSearchOutcome(offers=offers)
 
-        # ponytail: three exact nonstop pairs cap quota at four calls per search; add return
-        # selection or pagination if travelers need more choices.
-        displayed_offers = sorted(
+        # Prefer nonstop offers, but do not fail a route that only has connecting options.
+        nonstop_offers = sorted(
             (offer for offer in offers if offer.stops == 0),
             key=lambda offer: offer.price_usd,
         )[:3]
+        displayed_offers = nonstop_offers or sorted(offers, key=lambda offer: offer.price_usd)[:3]
         resolved = await asyncio.gather(
             *(
                 self._pair_round_trip_offer(
@@ -217,7 +217,7 @@ class LiveSearchApiProvider:
         ]
         if paired_offers:
             return FlightSearchOutcome(offers=paired_offers)
-        detail = str(resolved[0]) if resolved else "no nonstop outbound offers"
+        detail = str(resolved[0]) if resolved else "no outbound offers"
         return FlightSearchOutcome(
             unavailable_reason=f"searchapi could not resolve exact round-trip offers: {detail}"
         )

@@ -270,6 +270,68 @@ async def test_live_round_trip_search_returns_exact_pairs_and_reuses_the_resolve
     assert len(resolved_departure_tokens) == 3
 
 
+async def test_live_round_trip_search_falls_back_to_connecting_outbound_offers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A route may have no nonstop outbound offers; connecting offers are the usable fallback."""
+    resolved_tokens: list[str] = []
+
+    async def _fake_get(self, url, params=None, headers=None) -> httpx.Response:
+        params = params or {}
+        if "departure_token" in params:
+            resolved_tokens.append(params["departure_token"])
+            return httpx.Response(
+                200,
+                json={
+                    "best_flights": [
+                        {
+                            "flights": [
+                                {
+                                    "airline": "Return Air",
+                                    "departure_airport": {},
+                                    "arrival_airport": {},
+                                }
+                            ],
+                            "price": 300,
+                            "booking_token": "resolved-return",
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "best_flights": [
+                    {
+                        "flights": [
+                            {
+                                "airline": "Connecting Air",
+                                "departure_airport": {},
+                                "arrival_airport": {},
+                            },
+                            {
+                                "airline": "Connecting Air",
+                                "departure_airport": {},
+                                "arrival_airport": {},
+                            },
+                        ],
+                        "price": 500,
+                        "departure_token": "connecting-departure",
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", _fake_get)
+    outcome = await LiveSearchApiProvider(api_key="test-key").search_offers(
+        "JFK", "CDG", "2026-08-15", "2026-08-22"
+    )
+
+    assert len(outcome.offers) == 1
+    assert outcome.offers[0].stops == 1
+    assert resolved_tokens == ["connecting-departure"]
+
+
 @pytest.mark.parametrize(
     ("return_date", "expected_params"),
     [
