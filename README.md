@@ -6,6 +6,142 @@ while ambiguous values can produce a clarifying question instead of an itinerary
 **human-in-the-loop** state machine keeps booking handoff outside the agent: the model can research
 and propose flights, but it has no tool that can approve or execute booking state changes.
 
+> A small reference system for durable AI workflows: the planner is observable and replay-safe,
+> booking requires an explicit human decision, and every decision is persisted as an audit trail.
+
+## Start here
+
+- [Architecture](#architecture) — the system boundary and critical request path.
+- [Evaluation results](#evaluation-results) — 84/84 deterministic assertions passed in a 12-run
+  sample; the optional quality judge passed 11/12.
+- [Engineering decisions](docs/DECISIONS.md) — deeper rationale and trade-offs.
+
+There is no public hosted demo yet. Run the local stack below, or use the walkthrough as a short
+recorded demo script. The project intentionally does not present itself as a production travel
+service: it has no authentication, does not purchase flights, and has not been load-tested or
+security-audited.
+
+## Three-minute walkthrough
+
+This is the shortest useful demo for a reviewer. It shows agent research, persisted execution,
+human approval, and audit history in one path.
+
+1. Enter `JFK` → `San Diego`, `2026-09-01` → `2026-09-08`, age `78`, fitness `low`. Create the
+   trip and click **Plan itinerary**.
+2. Open **Agent execution** while it runs. Show the two read-only tools (`search_flights` and
+   `web_search`), live events, persisted run status, tool results, token usage, and structured
+   output. The low-fitness case cannot contain a `high`-intensity activity.
+3. Select a flight and click **Review booking**. Pause at **Approve this flight**: the agent can
+   propose, but it has no tool that can mutate booking state. Click approval, then **Continue to
+   airline**. The app retrieves checkout links; it does not purchase or hold a fare.
+4. Open **Approval history**. Show the transition, actor email, reason, and timestamp read from
+   the append-only database trail.
+5. For recovery, stop the backend during planning and restart it. DBOS resumes from Postgres
+   checkpoints; completed Cerebras, flight, and activity steps are reused rather than re-issued.
+
+For a repeatable demo, use the recorded flight and activity providers where possible. The LLM
+call remains live.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    UI[React frontend] -->|REST /api| API[FastAPI]
+    API --> Repo[Repositories]
+    Repo --> DB[(Postgres 16)]
+    API --> Agent[Pydantic AI planner]
+    Agent -->|read-only tools| Providers[Flight and activity providers]
+    Agent --> Cerebras[(Cerebras gpt-oss-120b)]
+    DBOS[DBOS workflows] -.->|checkpoint and replay| Agent
+    DBOS -.->|durable booking execute| Repo
+    DBOS --> DB
+    API -->|optional| Slack[Slack approval connector]
+    Slack -->|signed callback| API
+```
+
+The critical boundary is deliberate: the LLM researches and proposes; deterministic application
+code owns booking state, durability, and accountability.
+
+```mermaid
+sequenceDiagram
+    participant Traveler
+    participant UI as React UI
+    participant API as FastAPI
+    participant DBOS
+    participant Agent
+    participant Providers
+    participant DB as Postgres
+
+    Traveler->>UI: Submit trip details
+    UI->>API: POST /api/trips/{id}/plan
+    API->>DBOS: Start durable planner workflow
+    DBOS->>Agent: Run bounded tool loop
+    Agent->>DBOS: Durable search step
+    DBOS->>Providers: Call provider if not checkpointed
+    Providers-->>DBOS: Search results
+    DBOS->>DB: Persist checkpoint and execution event
+    Agent-->>DBOS: Itinerary or clarification
+    DBOS->>DB: Persist result and completed run
+    DBOS-->>UI: Render result and trace
+    Traveler->>UI: Approve selected flight
+    UI->>API: POST /api/bookings/{id}/confirm
+    API->>DB: Lock, validate, append audit row
+    DB-->>UI: Confirmed with actor and timestamp
+```
+
+### Why DBOS durability matters
+
+The planner and booking execution are `@DBOS.workflow`s backed by the same Postgres instance.
+The planner's Cerebras completion, flight search, and activity search are individual durable
+steps. If the process crashes, DBOS replays the workflow from its checkpoints and reuses completed
+step results instead of charging the external provider again. This is crash recovery, not a claim
+of exactly-once behavior across every provider.
+
+## Approval and audit trail
+
+Booking is a REST finite-state machine, not an agent tool:
+
+`PENDING_USER_CONFIRMATION → CONFIRMED → EXECUTED`
+
+Cancellation and fare expiry are terminal paths. Every legal transition is validated under a
+`SELECT ... FOR UPDATE` lock and writes a `booking_transition` row in the same transaction. The
+audit table is append-only at the database level: a Postgres trigger rejects updates and deletes.
+The UI's **Approval history** tab shows the booking, route, state transition, human actor, reason,
+and timestamp. Automatic expiry is distinguishable from a human decision because it has no actor.
+Slack is an optional signed approval channel; it can confirm or reject, but cannot bypass the
+state machine or purchase a ticket.
+
+## Evaluation results
+
+The eval suite uses four cases crossing age (`24`, `78`) and fitness (`low`, `high`) on the same
+route, with recorded provider data and a live planner model. It checks output type, source URL
+grounding, tool-call trajectory, flight exclusion, low-fitness safety, and physical-load
+comparisons.
+
+| Run | Result |
+|---|---|
+| Deterministic evals | 84/84 assertions passed across 12 case-runs (100%) |
+| Optional `FitnessAppropriateness` judge | 11/12 passed |
+| Judge finding | One high-fitness/older case was too conservative despite passing numeric load checks |
+
+The judge result is intentionally reported rather than hidden: deterministic checks establish
+hard invariants, while pacing and suitability still need subjective review.
+
+## Failure and recovery examples
+
+- **Stale fare:** after the 30-minute freshness window, approval or execution returns `EXPIRED`,
+  records a system transition, and the UI asks the traveler to search again.
+- **Planner over budget:** tool, token, and request limits bound the run; a `UsageLimitExceeded`
+  result becomes `PlanTooComplexOut` instead of an unbounded loop.
+- **Provider failure:** flight and activity providers are behind strategies, so recorded fixtures
+  support repeatable tests and live providers can fail without leaking provider-specific code into
+  the planner.
+- **Process crash:** DBOS resumes checkpointed planner or booking work from Postgres. Persisted
+  execution events and run rows remain available after restart.
+
+The detailed implementation notes remain in [ARCHITECTURE.md](docs/ARCHITECTURE.md),
+[EVALS.md](docs/EVALS.md), and [DECISIONS.md](docs/DECISIONS.md).
+
 ## Project status and limitations
 
 This is a portfolio and reference implementation intended for local development and evaluation.

@@ -24,6 +24,40 @@ flowchart LR
 The backend is a single FastAPI process. The frontend is a separate static SPA that talks to it
 over REST; there is no server-rendered coupling between them.
 
+## The critical request path
+
+```mermaid
+sequenceDiagram
+    participant Traveler
+    participant UI as React UI
+    participant API as FastAPI
+    participant DBOS
+    participant Agent as Planner agent
+    participant Providers as Flight/activity providers
+    participant DB as Postgres
+
+    Traveler->>UI: Submit required trip details
+    UI->>API: POST /api/trips/{id}/plan
+    API->>DBOS: Start durable planner workflow
+    DBOS->>Agent: Run bounded tool-calling loop
+    Agent->>DBOS: Durable step: search_flights / web_search
+    DBOS->>Providers: Call provider when step is not checkpointed
+    Providers-->>DBOS: Search results
+    DBOS->>DB: Persist checkpoints and execution events
+    Agent-->>DBOS: Structured itinerary or clarification
+    DBOS->>DB: Persist itinerary and completed run
+    DBOS-->>API: Return planner output
+    API-->>UI: Render itinerary and execution trace
+    Traveler->>UI: Approve selected flight
+    UI->>API: POST /api/bookings/{id}/confirm
+    API->>DB: Lock booking, validate transition, append audit row
+    DB-->>UI: CONFIRMED with actor and timestamp
+```
+
+The important boundary is visible in the sequence: the agent never receives a booking mutation
+tool. Research is model-directed; booking state, durability, and auditability are application- and
+database-owned.
+
 **Why this stack:** FastAPI + Postgres/SQLModel + Pydantic AI (with a Cerebras-hosted open-weight
 LLM) + React fit the application's relational data, transactional booking-state changes,
 tool-calling loop, and separate browser interface. See "Why this stack, as a whole" in

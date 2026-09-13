@@ -122,7 +122,9 @@ Four reliability issues surfaced by running the live eval repeatedly, not by uni
    (`AGENTS.md`): "Deliver your final answer by calling the result tool for it... Never write the
    itinerary or the question as plain text in a reply."
 
-**Live-verified result, all four fixes in place** (`--repeat 3 --with-judge`, 12 case-runs,
+## Live-verified result
+
+All four fixes in place (`--repeat 3 --with-judge`, 12 case-runs,
 `gpt-oss-120b` via Cerebras, recorded flight/activity fixtures + live LLM calls): all 12 case-runs
 completed cleanly — no `UsageLimitExceeded`, no exhausted output retries. 84/84 deterministic
 assertions passed (100%), and all four `PhysicalLoadComparisons` rows passed with real samples on
