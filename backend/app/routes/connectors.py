@@ -17,8 +17,13 @@ from app.schemas import (
     ErrorCode,
     ProblemDetail,
 )
+from app.security import enforce_api_segment
 
-router = APIRouter(prefix="/api/connectors", tags=["connectors"])
+router = APIRouter(
+    prefix="/api/connectors",
+    tags=["connectors"],
+    dependencies=[Depends(enforce_api_segment)],
+)
 
 _NOT_CONFIGURED: dict[int | str, dict[str, Any]] = {409: {"model": ProblemDetail}}
 

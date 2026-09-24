@@ -9,6 +9,21 @@ and propose flights, but it has no tool that can approve or execute booking stat
 > A small reference system for durable AI workflows: the planner is observable and replay-safe,
 > booking requires an explicit human decision, and every decision is persisted as an audit trail.
 
+## Zero-trust enterprise network extension
+
+TravelOps also provides a runnable zero-trust architecture demonstration. The browser, API,
+agent, database, connector, and security-operations surfaces are modeled as protected network
+segments. Signed access tokens carry tenant, role, device, and an MFA assertion; security-operations
+actions require that assertion for an operator. The `/api/security/events` endpoint exposes structured
+allow/deny decisions. Existing booking cancellation and the disabled-identity field provide the
+application's incident-response control; a production deployment would connect these actions to
+an incident-management system. Security events are append-only at the database layer.
+
+Set `ZERO_TRUST_ENFORCED=true` to require a bearer token on protected API routes. The local
+development token format is intentionally deterministic for the classroom demonstration and does
+not implement a second-factor challenge. A production deployment should replace it with an
+enterprise identity provider, hardware-backed MFA, and service-mesh/network enforcement.
+
 ## Start here
 
 - [Architecture](#architecture) — the system boundary and critical request path.

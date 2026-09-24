@@ -24,6 +24,7 @@ from app.models import (
 )
 from app.repositories import booking_repository as repository
 from app.routes.connectors import slack_notifications_enabled
+from app.security import enforce_api_segment
 from app.schemas import (
     BookingLogOut,
     BookingRequestCreate,
@@ -33,7 +34,11 @@ from app.schemas import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api", tags=["booking"])
+router = APIRouter(
+    prefix="/api",
+    tags=["booking"],
+    dependencies=[Depends(enforce_api_segment)],
+)
 
 _NOT_FOUND: dict[int | str, dict[str, Any]] = {404: {"model": ProblemDetail}}
 _NOT_FOUND_OR_CONFLICT: dict[int | str, dict[str, Any]] = {

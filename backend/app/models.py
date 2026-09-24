@@ -62,6 +62,30 @@ class User(SQLModel, table=True):
     # Nullable so a right-to-erasure request can null the email (anonymize) while leaving the
     # append-only audit rows, which reference user_id only, fully intact.
     email: str | None = Field(default=None, unique=True, index=True)
+    tenant_id: str = Field(default="demo-tenant", index=True)
+    role: str = Field(default="traveler")
+    device_id: str = Field(default="demo-device")
+    mfa_enabled: bool = Field(default=True)
+    disabled: bool = Field(default=False)
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class SecurityEvent(SQLModel, table=True):
+    """Append-only zero-trust decision record for monitoring and incident response."""
+
+    __tablename__ = "security_event"
+
+    id: int | None = Field(default=None, primary_key=True)
+    tenant_id: str = Field(index=True)
+    actor_user_id: int | None = Field(default=None, foreign_key="user_account.id", index=True)
+    device_id: str
+    source_segment: str
+    target_segment: str
+    action: str
+    resource: str
+    decision: str = Field(index=True)
+    reason: str
+    correlation_id: str = Field(index=True)
     created_at: datetime = Field(default_factory=utcnow)
 
 

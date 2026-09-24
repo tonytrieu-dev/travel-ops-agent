@@ -8,7 +8,7 @@ numbers scattered through the codebase.
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import SecretStr, computed_field
+from pydantic import SecretStr, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Cerebras runs gpt-oss-120b directly and keeps clean JSON tool-calls for Pydantic AI.
@@ -105,6 +105,8 @@ class Settings(BaseSettings):
 
     use_live_flight_api: bool = True
     frontend_origin: str = "http://localhost:5173"
+    zero_trust_enforced: bool = False
+    zero_trust_signing_secret: SecretStr = SecretStr("local-development-only")
 
     slack_bot_token: SecretStr | None = None
     slack_signing_secret: SecretStr | None = None
@@ -115,6 +117,17 @@ class Settings(BaseSettings):
     def dbos_database_url(self) -> str:
         """DBOS speaks the plain (psycopg/sync) Postgres URL, not the asyncpg dialect."""
         return self.database_url.replace("postgresql+asyncpg://", "postgresql://")
+
+    @model_validator(mode="after")
+    def _require_secure_zero_trust_secret(self) -> "Settings":
+        if self.zero_trust_enforced and self.zero_trust_signing_secret.get_secret_value() == (
+            "local-development-only"
+        ):
+            raise ValueError(
+                "ZERO_TRUST_SIGNING_SECRET must be set to a non-default value when "
+                "ZERO_TRUST_ENFORCED is enabled"
+            )
+        return self
 
 
 @lru_cache

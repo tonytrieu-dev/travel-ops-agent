@@ -21,6 +21,31 @@ flowchart LR
     Slack -->|/api/slack/interactions| API
 ```
 
+## Zero-trust enterprise-network overlay
+
+The application is a small enterprise-network simulation with six logical segments:
+`web`, `api`, `agent`, `data`, `connector`, and `security-operations`. The zero-trust overlay
+does not trust a request because it came from an internal segment. A request carries a signed
+identity and device context, and the server evaluates tenant, role, device status, MFA status,
+and the allowed segment path before a sensitive operation.
+
+The security control plane implements the course's five required areas:
+
+- **Identity and access management:** tenant, role, device, and disabled-identity attributes are
+  persisted and checked server-side.
+- **MFA:** security-operations actions require an MFA-verified access context. The local demo
+  validates an issuer-supplied assertion; it does not implement a second-factor challenge.
+- **Micro-segmentation:** service paths are an explicit allowlist rather than an implicit
+  internal-network trust.
+- **Continuous monitoring:** every security decision can be persisted as an append-only
+  `security_event` with actor, device, segments, action, decision, reason, and correlation ID.
+- **Incident response:** identity disablement and booking cancellation provide containment actions;
+  security events preserve the evidence needed for an operator or external incident-management
+  workflow.
+
+This is an application-level and container-friendly demonstration, not a claim that FastAPI
+replaces a production firewall, service mesh, enterprise IdP, or hardware MFA.
+
 The backend is a single FastAPI process. The frontend is a separate static SPA that talks to it
 over REST; there is no server-rendered coupling between them.
 

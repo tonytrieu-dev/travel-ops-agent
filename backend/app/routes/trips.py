@@ -44,8 +44,13 @@ from app.schemas import (
     TripSnapshotOut,
 )
 from app.services.flight_search import FlightSearchService, flight_provider_name
+from app.security import enforce_api_segment
 
-router = APIRouter(prefix="/api", tags=["trips"])
+router = APIRouter(
+    prefix="/api",
+    tags=["trips"],
+    dependencies=[Depends(enforce_api_segment)],
+)
 
 _VALIDATION: dict[int | str, dict[str, Any]] = {422: {"model": ProblemDetail}}
 _NOT_FOUND: dict[int | str, dict[str, Any]] = {404: {"model": ProblemDetail}}
