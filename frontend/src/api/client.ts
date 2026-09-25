@@ -14,6 +14,18 @@ import type {
 } from "./types"
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000/api"
+const ACCESS_TOKEN_STORAGE_KEY = "travel-agent.accessToken"
+
+export type LoginResult = {
+  access_token: string
+  expires_at: string
+  session_id: string
+  mfa_required: boolean
+}
+
+export function getAccessToken(): string | null {
+  return localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY)
+}
 
 export class ApiError extends Error {
   code: ProblemDetail["code"]
@@ -27,10 +39,12 @@ export class ApiError extends Error {
 }
 
 async function request<TResponse>(path: string, options?: RequestInit): Promise<TResponse> {
+  const accessToken = getAccessToken()
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...options,
     headers: {
       "Content-Type": "application/json",
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       ...options?.headers,
     },
   })
@@ -41,6 +55,24 @@ async function request<TResponse>(path: string, options?: RequestInit): Promise<
   }
 
   return (await response.json()) as TResponse
+}
+
+export async function login(email: string, password: string, device_id: string): Promise<LoginResult> {
+  const result = await request<LoginResult>("/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ email, password, device_id }),
+  })
+  localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, result.access_token)
+  return result
+}
+
+export async function verifyMfa(session_id: string, code: string): Promise<LoginResult> {
+  const result = await request<LoginResult>("/auth/mfa", {
+    method: "POST",
+    body: JSON.stringify({ session_id, code }),
+  })
+  localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, result.access_token)
+  return result
 }
 
 export function createTrip(tripRequestCreate: TripRequestCreate): Promise<TripRequestOut> {

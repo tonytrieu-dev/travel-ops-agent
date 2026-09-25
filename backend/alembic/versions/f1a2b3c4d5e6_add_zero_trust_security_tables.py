@@ -61,9 +61,18 @@ def upgrade() -> None:
         FOR EACH ROW EXECUTE FUNCTION reject_security_event_mutation();
         """
     )
+    op.execute(
+        """
+        CREATE TRIGGER security_event_no_truncate
+        BEFORE TRUNCATE ON security_event
+        FOR EACH STATEMENT EXECUTE FUNCTION reject_security_event_mutation();
+        REVOKE TRUNCATE ON security_event FROM PUBLIC;
+        """
+    )
 
 
 def downgrade() -> None:
+    op.execute("DROP TRIGGER IF EXISTS security_event_no_truncate ON security_event")
     op.execute("DROP TRIGGER IF EXISTS security_event_append_only ON security_event")
     op.execute("DROP FUNCTION IF EXISTS reject_security_event_mutation()")
     op.drop_index("ix_security_event_correlation_id", table_name="security_event")

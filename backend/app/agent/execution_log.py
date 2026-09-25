@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
 from app.models import AgentRun, ExecutionEvent, ExecutionEventKind, TripRequest, utcnow
+from app.request_context import correlation_id
 
 
 @dataclass
@@ -119,6 +120,7 @@ async def record_event(
                 detail=detail,
                 duration_ms=duration_ms,
                 data=data,
+                correlation_id=correlation_id(),
             )
         )
         await context.session.commit()

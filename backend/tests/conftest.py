@@ -35,7 +35,7 @@ os.environ.setdefault("DATABASE_URL", TEST_DATABASE_URL)
 
 _ALL_TABLES = (
     "booking_transition, execution_event, agent_run_step, agent_run, hitl_booking_log, "
-    "itinerary, flight_search_result, trip_request, user_account, connector_setting, security_event"
+    "itinerary, flight_search_result, trip_request, user_account, connector_setting, security_event, security_session, security_incident"
 )
 
 

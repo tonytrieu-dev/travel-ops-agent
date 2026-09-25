@@ -12,28 +12,55 @@ and propose flights, but it has no tool that can approve or execute booking stat
 ## Zero-trust enterprise network extension
 
 TravelOps also provides a runnable zero-trust architecture demonstration. Protected API routes
-require a signed identity and device context when zero-trust enforcement is enabled. Every
-authenticated web-to-API request records its security decision. Existing booking cancellation
-and the disabled-identity field provide the application's incident-response control; a production
-deployment would connect these actions to an incident-management system. Security events are
-append-only at the database layer.
+require a short-lived, server-backed session bound to identity, tenant, role, device, and MFA when
+zero-trust enforcement is enabled. Tenant ownership and reusable policy checks protect resources;
+internal agent calls use a separate service token; security events and incidents are append-only.
+Repeated denials revoke the affected session.
 
-Set `ZERO_TRUST_ENFORCED=true` to require a bearer token on protected API routes. The local
-development token format is intentionally deterministic for the classroom demonstration and does
-not implement a second-factor challenge. A production deployment should replace it with an
-enterprise identity provider, hardware-backed MFA, and service-mesh/network enforcement.
+Set `ZERO_TRUST_ENFORCED=true` to require a bearer token on protected API routes. The local issuer is
+OIDC-shaped for the classroom demo, but intentionally small: it uses an application signing key and
+TOTP rather than pretending to be a production IdP. Production deployment should put Keycloak or
+another OIDC provider in front of the API and use mTLS/service-mesh identity for internal traffic.
+
+The SPA signs in through `POST /api/auth/login`, submits the returned session to
+`POST /api/auth/mfa`, stores the resulting 15-minute bearer token in browser storage, and attaches it
+to every protected request. Set `ZERO_TRUST_SIGNING_SECRET` and use the seeded demo credentials or a
+local user; MFA-enabled users must complete the TOTP step. Connector settings are deployment-wide,
+not tenant-owned, and both reading and changing them require the `security-operator` or `admin` role
+plus verified MFA.
 
 ## Start here
 
 - [Architecture](#architecture) — the system boundary and critical request path.
 - [Evaluation results](#evaluation-results) — 84/84 deterministic assertions passed in a 12-run
   sample; the optional quality judge passed 11/12.
+- [Zero-trust demo](#zero-trust-demo) — deterministic identities, MFA, attacks, containment, and
+  security-operations queries.
 - [Engineering decisions](docs/DECISIONS.md) — deeper rationale and trade-offs.
+- [Security evaluation](docs/SECURITY_EVALUATION.md) — actual focused-test results and pending
+  PostgreSQL scenarios.
 
 There is no public hosted demo yet. Run the local stack below, or use the walkthrough as a short
 recorded demo script. The project intentionally does not present itself as a production travel
-service: it has no authentication, does not purchase flights, and has not been load-tested or
-security-audited.
+service: it does not purchase flights and has not been load-tested or security-audited.
+
+## Zero-trust demo
+
+```bash
+docker compose up -d postgres
+cp .env.example .env
+# Set ZERO_TRUST_ENFORCED=true, ZERO_TRUST_SIGNING_SECRET, and AGENT_SERVICE_TOKEN in .env.
+cd backend
+uv run alembic upgrade head
+uv run python scripts/seed_security_demo.py
+uv run python scripts/security_demo.py
+```
+
+The synthetic accounts all use `demo-password` and the TOTP secret
+`JBSWY3DPEHPK3PXP` (the script calculates the current six-digit code). The demo shows a valid
+tenant-scoped request, MFA-gated operator access, token/session rejection, cross-tenant denial,
+browser segment spoof rejection, five denials triggering session revocation, and the
+security-operations event/incident query. These are classroom credentials; never reuse them.
 
 ## Three-minute walkthrough
 
@@ -259,6 +286,8 @@ Frontend serves on `http://localhost:5173` (already whitelisted by the backend's
 cd backend
 uv run pytest -q
 uv run pyrefly check
+# Focused zero-trust tests (the integration test needs PostgreSQL)
+uv run pytest -q tests/test_zero_trust.py tests/test_zero_trust_integration.py
 ```
 
 ### 6. Evals

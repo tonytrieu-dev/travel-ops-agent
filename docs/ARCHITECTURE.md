@@ -23,23 +23,21 @@ flowchart LR
 
 ## Zero-trust enterprise-network overlay
 
-The application is a small zero-trust API-boundary simulation. A request carries a signed
-identity and device context, and the server checks tenant, role, device status, and MFA status
-before admitting it from the web boundary to protected API routes.
+The application is a small, container-friendly zero-trust API-boundary demonstration. A request
+carries a short-lived signed identity bound to a server-side session and device; the API checks
+tenant, role, MFA, revocation, and resource ownership before admitting it from the web boundary.
 
 The security control plane implements the course's five required areas:
 
 - **Identity and access management:** tenant, role, device, and disabled-identity attributes are
   persisted and checked server-side.
-- **MFA:** the local demo validates an issuer-supplied assertion; it does not implement a
-  second-factor challenge.
+- **MFA:** the local demo upgrades a pending session only after validating a TOTP code.
 - **API segmentation:** protected routes admit authenticated web requests through one explicit
   boundary rather than assuming internal-network trust.
 - **Continuous monitoring:** each admitted request is persisted as an append-only
   `security_event` with actor, device, segments, action, decision, reason, and correlation ID.
-- **Incident response:** identity disablement and booking cancellation provide containment actions;
-  security events preserve the evidence needed for an operator or external incident-management
-  workflow.
+- **Incident response:** repeated denials create an incident and revoke the affected session;
+  security operators can revoke sessions or disable identities, with the evidence retained.
 
 This is an application-level and container-friendly demonstration, not a claim that FastAPI
 replaces a production firewall, service mesh, enterprise IdP, or hardware MFA.
@@ -266,7 +264,9 @@ for this project; see [DECISIONS.md](DECISIONS.md).
 Optional, off by default. `GET /api/connectors` reads and `PATCH /api/connectors/slack` flips the
 single-row `connector_setting.slack_enabled` toggle, gated so it can only be enabled when
 `SLACK_BOT_TOKEN`/`SLACK_SIGNING_SECRET`/`SLACK_APPROVALS_CHANNEL_ID` are all configured (409
-otherwise). The frontend's Connectors tab (`ConnectorsPanel.tsx`) drives this toggle.
+otherwise). Connector settings are deployment-wide rather than tenant-owned; both endpoints require
+the `security-operator` or `admin` role and verified MFA. The frontend's Connectors tab
+(`ConnectorsPanel.tsx`) drives this toggle.
 
 When enabled, `request_booking` (`routes/booking.py`) additionally posts a Confirm/Reject Block
 Kit message via `notify_pending_approval`; Slack's callback hits `POST /api/slack/interactions`,

@@ -27,6 +27,7 @@ from app.models import (
     User,
     utcnow,
 )
+from app.request_context import correlation_id
 from app.schemas import ErrorCode
 from app.state import ALLOWED_TRANSITIONS, BookingState, BookingTransitionReason
 
@@ -76,6 +77,7 @@ def _record_transition(
             to_state=to_state,
             reason=reason.value,
             actor_user_id=actor_user_id,
+            correlation_id=correlation_id(),
         )
     )
     booking.state = to_state

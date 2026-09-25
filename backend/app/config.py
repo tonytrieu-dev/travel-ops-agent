@@ -107,6 +107,7 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://localhost:5173"
     zero_trust_enforced: bool = False
     zero_trust_signing_secret: SecretStr = SecretStr("local-development-only")
+    agent_service_token: SecretStr = SecretStr("local-agent-service-only")
 
     slack_bot_token: SecretStr | None = None
     slack_signing_secret: SecretStr | None = None
@@ -127,6 +128,8 @@ class Settings(BaseSettings):
                 "ZERO_TRUST_SIGNING_SECRET must be set to a non-default value when "
                 "ZERO_TRUST_ENFORCED is enabled"
             )
+        if self.zero_trust_enforced and self.agent_service_token.get_secret_value() == "local-agent-service-only":
+            raise ValueError("AGENT_SERVICE_TOKEN must be set to a non-default value when ZERO_TRUST_ENFORCED is enabled")
         return self
 
 

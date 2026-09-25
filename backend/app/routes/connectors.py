@@ -3,12 +3,13 @@ repository module, this is a single row with two simple queries."""
 
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
 from app.db import get_session
+from app.dependencies import SecurityContext, get_security_context
 from app.models import ConnectorSetting
 from app.schemas import (
     ConnectorsOut,
@@ -17,7 +18,7 @@ from app.schemas import (
     ErrorCode,
     ProblemDetail,
 )
-from app.security import enforce_api_segment
+from app.security import authorize, enforce_api_segment
 
 router = APIRouter(
     prefix="/api/connectors",
@@ -64,7 +65,12 @@ async def slack_notifications_enabled(session: AsyncSession, settings: Settings)
 
 
 @router.get("", response_model=ConnectorsOut)
-async def get_connectors(session: AsyncSession = Depends(get_session)) -> ConnectorsOut:
+async def get_connectors(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    context: SecurityContext = Depends(get_security_context),
+) -> ConnectorsOut:
+    await authorize(context, session, action="connector.configure", resource="connectors", request=request, require_mfa=True)
     settings = get_settings()
     row = await _get_or_create_row(session)
     return ConnectorsOut(
@@ -74,8 +80,12 @@ async def get_connectors(session: AsyncSession = Depends(get_session)) -> Connec
 
 @router.patch("/slack", response_model=ConnectorsOut, responses=_NOT_CONFIGURED)
 async def set_slack_connector(
-    body: ConnectorToggleUpdate, session: AsyncSession = Depends(get_session)
+    body: ConnectorToggleUpdate,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    context: SecurityContext = Depends(get_security_context),
 ) -> ConnectorsOut:
+    await authorize(context, session, action="connector.configure", resource="slack", request=request, require_mfa=True)
     settings = get_settings()
     if body.enabled and not slack_configured(settings):
         raise ConnectorError(
