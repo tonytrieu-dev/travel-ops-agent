@@ -19,7 +19,7 @@ from app.rate_limit import RateLimitError
 from app.repositories.booking_repository import BookingError
 from app.repositories.trips_repository import TripError
 from app.routes import auth, booking, connectors, security, service, slack, trips
-from app.request_context import set_correlation_id
+from app.request_context import bind_correlation_id
 from app.routes.connectors import ConnectorError
 from app.schemas import ErrorCode, ProblemDetail
 from app.security import SecurityError
@@ -44,8 +44,8 @@ def create_app() -> FastAPI:
     @app.middleware("http")
     async def correlation_id(request: Request, call_next):
         request.state.correlation_id = request.headers.get("x-correlation-id") or str(uuid4())
-        set_correlation_id(request.state.correlation_id)
-        response = await call_next(request)
+        with bind_correlation_id(request.state.correlation_id):
+            response = await call_next(request)
         response.headers["x-correlation-id"] = request.state.correlation_id
         return response
     app.include_router(booking.router)

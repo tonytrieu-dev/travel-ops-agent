@@ -3,6 +3,7 @@ import {
   ApiError,
   createTrip,
   getAccessToken,
+  getAuthConfig,
   getTripSnapshot,
   listTrips,
   login,
@@ -33,9 +34,9 @@ function extractErrorMessage(error: unknown): string {
 }
 
 function LoginPanel({ onAuthenticated }: { onAuthenticated: () => void }) {
-  const [email, setEmail] = useState("")
+  const [email, setEmail] = useState("traveler@tenant-a.test")
   const [password, setPassword] = useState("")
-  const [deviceId, setDeviceId] = useState("browser")
+  const [deviceId, setDeviceId] = useState("device-a-traveler")
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [code, setCode] = useState("")
   const [error, setError] = useState<string | null>(null)
@@ -45,7 +46,8 @@ function LoginPanel({ onAuthenticated }: { onAuthenticated: () => void }) {
     setError(null)
     try {
       const result = await login(email, password, deviceId)
-      setSessionId(result.session_id)
+      if (result.mfa_required) setSessionId(result.session_id)
+      else onAuthenticated()
     } catch (error) {
       setError(extractErrorMessage(error))
     }
@@ -101,7 +103,7 @@ const TABS: { key: TabKey; label: string }[] = [
 ]
 
 function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState(Boolean(getAccessToken()))
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null)
   const [activeTab, setActiveTab] = useState<TabKey>("trip")
 
   const [trip, setTrip] = useState<TripRequestOut | null>(null)
@@ -120,6 +122,12 @@ function App() {
   const [planError, setPlanError] = useState<string | null>(null)
 
   const isRunActive = isSearchingFlights || isPlanning
+
+  useEffect(() => {
+    getAuthConfig()
+      .then(({ enforced }) => setIsAuthenticated(!enforced || Boolean(getAccessToken())))
+      .catch(() => setIsAuthenticated(false))
+  }, [])
 
   // Shared by the hard-refresh restore below and by clicking a trip in the sidebar list — both
   // need to load a trip's snapshot into state and remember it as the active trip.
@@ -246,6 +254,7 @@ function App() {
     setFlightSearchError(null)
   }
 
+  if (isAuthenticated === null) return null
   if (!isAuthenticated) return <LoginPanel onAuthenticated={() => setIsAuthenticated(true)} />
 
   return (

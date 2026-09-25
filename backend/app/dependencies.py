@@ -152,6 +152,7 @@ async def create_security_session(session: AsyncSession, user: User, device_id: 
         user_id=user.id,
         tenant_id=user.tenant_id,
         device_id=device_id,
+        mfa_verified=not user.mfa_enabled,
         expires_at=utcnow() + timedelta(minutes=15),
     )
     session.add(security_session)

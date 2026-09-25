@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
 from app.models import AgentRun, ExecutionEvent, ExecutionEventKind, TripRequest, utcnow
-from app.request_context import correlation_id
+from app.request_context import bind_correlation_id, correlation_id
 
 
 @dataclass
@@ -33,39 +33,40 @@ _current: ContextVar[_ExecutionContext | None] = ContextVar("execution_context",
 
 @asynccontextmanager
 async def execution_context(
-    session: AsyncSession, trip_request_id: int, *, run_model: str | None = None
+    session: AsyncSession, trip_request_id: int, *, run_model: str | None = None, correlation: str | None = None
 ) -> AsyncIterator[AgentRun | None]:
     """Bind one execution so its append-only events retain both trip and run ownership."""
-    agent_run = (
-        AgentRun(trip_request_id=trip_request_id, status="running", model=run_model)
-        if run_model is not None
-        else None
-    )
-    if agent_run is not None:
-        session.add(agent_run)
-        await session.commit()
-        assert agent_run.id is not None
-
-    token = _current.set(
-        _ExecutionContext(
-            session=session,
-            trip_request_id=trip_request_id,
-            agent_run=agent_run,
+    with bind_correlation_id(correlation):
+        agent_run = (
+            AgentRun(trip_request_id=trip_request_id, status="running", model=run_model)
+            if run_model is not None
+            else None
         )
-    )
-    try:
-        yield agent_run
-    except Exception:
-        if agent_run is not None and agent_run.status == "running":
-            agent_run.status = "failed"
-            agent_run.finished_at = utcnow()
-            agent_run.total_ms = round(
-                (agent_run.finished_at - agent_run.started_at).total_seconds() * 1000
-            )
+        if agent_run is not None:
+            session.add(agent_run)
             await session.commit()
-        raise
-    finally:
-        _current.reset(token)
+            assert agent_run.id is not None
+
+        token = _current.set(
+            _ExecutionContext(
+                session=session,
+                trip_request_id=trip_request_id,
+                agent_run=agent_run,
+            )
+        )
+        try:
+            yield agent_run
+        except Exception:
+            if agent_run is not None and agent_run.status == "running":
+                agent_run.status = "failed"
+                agent_run.finished_at = utcnow()
+                agent_run.total_ms = round(
+                    (agent_run.finished_at - agent_run.started_at).total_seconds() * 1000
+                )
+                await session.commit()
+            raise
+        finally:
+            _current.reset(token)
 
 
 def _bound_context(caller_name: str) -> _ExecutionContext:

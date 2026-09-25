@@ -25,6 +25,7 @@ from app.models import (
 from app.repositories import booking_repository as repository
 from app.routes.connectors import slack_notifications_enabled
 from app.security import authorize, enforce_api_segment, require_owned_booking, require_owned_trip
+from app.request_context import correlation_id
 from app.schemas import (
     BookingLogOut,
     BookingRequestCreate,
@@ -106,6 +107,7 @@ async def _notify_slack_if_enabled(session: AsyncSession, booking: HITLBookingLo
 
 @router.get("/bookings", response_model=list[BookingLogOut])
 async def list_bookings(
+    request: Request,
     session: AsyncSession = Depends(get_session),
     user: User = Depends(get_current_user),
     context: SecurityContext = Depends(get_security_context),
@@ -113,7 +115,7 @@ async def list_bookings(
     """Backs the global approval-history tab: every booking this user requested, each with its
     append-only transition trail."""
     assert user.id is not None, "get_current_user must always return a persisted user"
-    await authorize(context, session, action="trip.read", resource="bookings")
+    await authorize(context, session, action="trip.read", resource="bookings", request=request)
     bookings = await repository.list_bookings_with_transitions_for_user(session, user.id)
     every_transition = [transition for _, transitions in bookings for transition in transitions]
     actor_emails = await repository.actor_emails_for(session, every_transition)
@@ -148,7 +150,7 @@ async def confirm_booking(
 async def execute_booking(log_id: int, request: Request, session: AsyncSession = Depends(get_session), context: SecurityContext = Depends(get_security_context)) -> BookingLogOut:
     await authorize(context, session, action="booking.execute", resource=f"booking:{log_id}", request=request, require_mfa=True)
     await require_owned_booking(session, context, log_id, request)
-    return await execute_booking_durable(log_id)
+    return await execute_booking_durable(log_id, correlation_id())
 
 
 @router.post(

@@ -1,8 +1,6 @@
 """Reusable policy, segment, audit, and containment controls."""
 
 from datetime import timedelta
-from uuid import uuid4
-
 from fastapi import Depends, HTTPException, Request
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +10,7 @@ from app.db import get_session, get_session_factory
 from app.config import get_settings
 from app.dependencies import SecurityContext, get_security_context
 from app.models import SecurityEvent, SecurityIncident, SecuritySession, TripRequest, User, HITLBookingLog, utcnow
+from app.request_context import correlation_id
 
 DENIAL_THRESHOLD = 5
 DENIAL_WINDOW_MINUTES = 5
@@ -56,7 +55,7 @@ async def record_security_event(
         resource=resource,
         decision=decision,
         reason=reason,
-        correlation_id=(getattr(request.state, "correlation_id", None) if request else None) or str(uuid4()),
+        correlation_id=(getattr(request.state, "correlation_id", None) if request else None) or correlation_id(),
     )
     session.add(event)
     await session.flush()
@@ -86,14 +85,14 @@ async def record_security_event(
                         reason=f"{DENIAL_THRESHOLD} denied requests in {DENIAL_WINDOW_MINUTES} minutes",
                     )
                 )
-                if event.session_id:
-                    security_session = await session.scalar(
-                        select(SecuritySession).where(
-                            col(SecuritySession.session_id) == event.session_id
-                        )
+            if event.session_id:
+                security_session = await session.scalar(
+                    select(SecuritySession).where(
+                        col(SecuritySession.session_id) == event.session_id
                     )
-                    if security_session is not None:
-                        security_session.revoked_at = utcnow()
+                )
+                if security_session is not None:
+                    security_session.revoked_at = utcnow()
     await session.commit()
     return event
 

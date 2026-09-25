@@ -18,8 +18,14 @@ from app.dependencies import (
 from app.models import SecuritySession, User, utcnow
 from app.schemas import LoginRequest, MfaVerifyRequest, TokenOut
 from app.security import record_authentication_failure, record_security_event
+from app.rate_limit import enforce_request_rate_limit
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+
+@router.get("/config")
+async def auth_config() -> dict[str, bool]:
+    return {"enforced": get_settings().zero_trust_enforced}
 
 
 @router.post("/login", response_model=TokenOut)
@@ -27,7 +33,7 @@ async def login(
     body: LoginRequest, request: Request, session: AsyncSession = Depends(get_session)
 ) -> TokenOut:
     user = await session.scalar(select(User).where(col(User.email) == body.email))
-    if user is None or user.disabled or not password_matches(user, body.password):
+    if user is None or user.disabled or user.device_id != body.device_id or not password_matches(user, body.password):
         await record_authentication_failure(reason="invalid credentials", request=request)
         raise HTTPException(status_code=401, detail="invalid credentials")
     security_session = await create_security_session(session, user, body.device_id)
@@ -37,28 +43,50 @@ async def login(
         action="auth.login",
         resource=f"user:{user.id}",
         decision="allow",
-        reason="password verified; MFA session pending",
+        reason="password verified; MFA session pending" if user.mfa_enabled else "password verified",
+        request=request,
+        tenant_id=user.tenant_id,
+        actor_user_id=user.id,
+        device_id=security_session.device_id,
+        session_id=security_session.session_id,
     )
     return TokenOut(
         access_token=issue_access_token(security_session, user, get_settings().zero_trust_signing_secret.get_secret_value()),
         expires_at=security_session.expires_at.replace(tzinfo=UTC),
         session_id=security_session.session_id,
-        mfa_required=True,
+        mfa_required=user.mfa_enabled,
     )
 
 
-@router.post("/mfa", response_model=TokenOut)
+@router.post("/mfa", response_model=TokenOut, dependencies=[Depends(enforce_request_rate_limit)])
 async def verify_mfa(
     body: MfaVerifyRequest, request: Request, session: AsyncSession = Depends(get_session)
 ) -> TokenOut:
     security_session = await session.scalar(
         select(SecuritySession).where(col(SecuritySession.session_id) == body.session_id)
     )
-    if security_session is None or security_session.expires_at <= utcnow():
+    if security_session is None:
         await record_authentication_failure(reason="MFA session expired", request=request)
         raise HTTPException(status_code=401, detail="session expired")
+    if security_session.expires_at <= utcnow():
+        await record_authentication_failure(
+            reason="MFA session expired",
+            tenant_id=security_session.tenant_id,
+            actor_user_id=security_session.user_id,
+            device_id=security_session.device_id,
+            session_id=security_session.session_id,
+            request=request,
+        )
+        raise HTTPException(status_code=401, detail="session expired")
     if not await verify_session_mfa(session, security_session, body.code):
-        await record_authentication_failure(reason="invalid MFA code", request=request)
+        await record_authentication_failure(
+            reason="invalid MFA code",
+            tenant_id=security_session.tenant_id,
+            actor_user_id=security_session.user_id,
+            device_id=security_session.device_id,
+            session_id=security_session.session_id,
+            request=request,
+        )
         raise HTTPException(status_code=401, detail="invalid MFA code")
     user = await session.get(User, security_session.user_id)
     if user is None:
@@ -70,18 +98,3 @@ async def verify_mfa(
         session_id=security_session.session_id,
         mfa_required=False,
     )
-
-
-@router.get("/.well-known/openid-configuration")
-async def discovery() -> dict[str, str]:
-    return {
-        "issuer": "/api/auth",
-        "token_endpoint": "/api/auth/login",
-        "jwks_uri": "/api/auth/jwks",
-        "grant_types_supported": "password,mfa",
-    }
-
-
-@router.get("/jwks")
-async def jwks() -> dict[str, list[object]]:
-    return {"keys": []}

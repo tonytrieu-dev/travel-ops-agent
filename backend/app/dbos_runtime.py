@@ -23,6 +23,7 @@ from app.db import get_session_factory
 from app.models import AgentRun as PersistedAgentRun
 from app.models import FlightSearchResult, TripRequest
 from app.rate_limit import acquire_agent_run_slot, release_agent_run_slot
+from app.request_context import bind_correlation_id, correlation_id
 from app.repositories import booking_repository as repository
 from app.schemas import (
     BookingLogOut,
@@ -96,18 +97,19 @@ async def _fetch_booking_options_step(flight: FlightSearchResult) -> list[dict]:
 
 
 @DBOS.workflow(name="execute_booking")
-async def execute_booking_durable(log_id: int) -> BookingLogOut:
-    async with get_session_factory()() as session:
-        booking = await repository.execute_booking(session, log_id, _fetch_booking_options_step)
-        return BookingLogOut.model_validate(booking)
+async def execute_booking_durable(log_id: int, trace_id: str | None = None) -> BookingLogOut:
+    with bind_correlation_id(trace_id):
+        async with get_session_factory()() as session:
+            booking = await repository.execute_booking(session, log_id, _fetch_booking_options_step)
+            return BookingLogOut.model_validate(booking)
 
 
 @DBOS.workflow(name="run_planner")
-async def _run_planner_workflow(trip_id: int, prompt: str) -> PlannerOutput:
+async def _run_planner_workflow(trip_id: int, prompt: str, trace_id: str) -> PlannerOutput:
     settings = get_settings()
     async with (
         get_session_factory()() as session,
-        execution_context(session, trip_id, run_model=CEREBRAS_MODEL) as persisted_run,
+        execution_context(session, trip_id, run_model=CEREBRAS_MODEL, correlation=trace_id) as persisted_run,
     ):
         trip = await session.get(TripRequest, trip_id)
         flight_provider = get_flight_provider(settings)
@@ -167,13 +169,13 @@ async def _run_planner_workflow(trip_id: int, prompt: str) -> PlannerOutput:
     return result.output
 
 
-async def run_planner_durable(trip_id: int, prompt: str) -> PlannerOutput:
+async def run_planner_durable(trip_id: int, prompt: str, trace_id: str | None = None) -> PlannerOutput:
     """Not itself a DBOS workflow: the concurrency slot is plain in-process state, and acquiring
     it inside a replayable workflow body risks a double-acquire if DBOS re-enters that body
     during its own internal record/persist resolution (observed empirically) — so the slot wraps
     the durable call from the outside instead."""
     await acquire_agent_run_slot()
     try:
-        return await _run_planner_workflow(trip_id, prompt)
+        return await _run_planner_workflow(trip_id, prompt, trace_id or correlation_id())
     finally:
         release_agent_run_slot()

@@ -52,7 +52,7 @@ cp .env.example .env
 # Set ZERO_TRUST_ENFORCED=true, ZERO_TRUST_SIGNING_SECRET, and AGENT_SERVICE_TOKEN in .env.
 cd backend
 uv run alembic upgrade head
-uv run python scripts/seed_security_demo.py
+uv run python -m scripts.seed_security_demo
 uv run python scripts/security_demo.py
 ```
 

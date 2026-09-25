@@ -18,19 +18,18 @@ def totp(secret: str) -> str:
     return f"{(int.from_bytes(digest[offset : offset + 4], 'big') & 0x7FFFFFFF) % 1_000_000:06d}"
 
 
-def login(client: httpx.Client, email: str, device_id: str, mfa: bool = False) -> str:
+def login(client: httpx.Client, email: str, device_id: str) -> str:
     response = client.post(
         "/api/auth/login",
         json={"email": email, "device_id": device_id, "password": "demo-password"},
     )
     response.raise_for_status()
     body = response.json()
-    if mfa:
-        response = client.post(
-            "/api/auth/mfa", json={"session_id": body["session_id"], "code": totp("JBSWY3DPEHPK3PXP")}
-        )
-        response.raise_for_status()
-        body = response.json()
+    response = client.post(
+        "/api/auth/mfa", json={"session_id": body["session_id"], "code": totp("JBSWY3DPEHPK3PXP")}
+    )
+    response.raise_for_status()
+    body = response.json()
     return body["access_token"]
 
 
@@ -39,8 +38,8 @@ def show(label: str, response: httpx.Response) -> None:
 
 
 with httpx.Client(base_url=os.getenv("TRAVEL_OPS_URL", "http://localhost:8000")) as client:
-    traveler = login(client, "traveler@tenant-a.test", "device-a-traveler", mfa=True)
-    operator = login(client, "operator@tenant-a.test", "device-a-operator", mfa=True)
+    traveler = login(client, "traveler@tenant-a.test", "device-a-traveler")
+    operator = login(client, "operator@tenant-a.test", "device-a-operator")
     headers = {"Authorization": f"Bearer {traveler}"}
     show("owned trips", client.get("/api/trips", headers=headers))
     show("browser segment spoof", client.get("/api/trips", headers={**headers, "x-source-segment": "agent"}))

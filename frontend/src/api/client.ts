@@ -14,7 +14,7 @@ import type {
 } from "./types"
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000/api"
-const ACCESS_TOKEN_STORAGE_KEY = "travel-agent.accessToken"
+const ACCESS_TOKEN_STORAGE_KEY = "travel-agent.verifiedAccessToken"
 
 export type LoginResult = {
   access_token: string
@@ -23,8 +23,14 @@ export type LoginResult = {
   mfa_required: boolean
 }
 
+export type AuthConfig = { enforced: boolean }
+
 export function getAccessToken(): string | null {
   return localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY)
+}
+
+export function getAuthConfig(): Promise<AuthConfig> {
+  return request<AuthConfig>("/auth/config")
 }
 
 export class ApiError extends Error {
@@ -62,7 +68,7 @@ export async function login(email: string, password: string, device_id: string):
     method: "POST",
     body: JSON.stringify({ email, password, device_id }),
   })
-  localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, result.access_token)
+  if (!result.mfa_required) localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, result.access_token)
   return result
 }
 

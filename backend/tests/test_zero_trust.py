@@ -2,14 +2,17 @@ import base64
 import hashlib
 import hmac
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
 
 from app.config import Settings
-from app.dependencies import _context_from_claims, _decode_token, _totp_code
-from app.models import User
+from app.dependencies import SecurityContext, _context_from_claims, _decode_token, _totp_code
+from app.models import SecurityIncident, SecuritySession, User, utcnow
+from app.request_context import bind_correlation_id, correlation_id
+from app.security import DENIAL_THRESHOLD, record_security_event
 
 pytestmark = pytest.mark.no_database
 
@@ -152,3 +155,54 @@ def test_zero_trust_totp_is_time_bound_and_six_digits() -> None:
     code = _totp_code("JBSWY3DPEHPK3PXP", timestamp=1_760_000_000)
     assert code.isdigit() and len(code) == 6
     assert code != _totp_code("JBSWY3DPEHPK3PXP", timestamp=1_760_000_031)
+
+
+def test_correlation_id_is_stable_within_a_boundary_and_resets_afterward() -> None:
+    with bind_correlation_id("workflow-a"):
+        assert correlation_id() == correlation_id() == "workflow-a"
+    with bind_correlation_id("workflow-b"):
+        assert correlation_id() == "workflow-b"
+
+
+async def test_threshold_revokes_current_session_when_device_already_has_open_incident() -> None:
+    security_session = SecuritySession(
+        session_id="session-b",
+        user_id=7,
+        tenant_id="tenant-a",
+        device_id="device-a",
+        expires_at=utcnow() + timedelta(minutes=15),
+    )
+    session = MagicMock()
+    session.flush = AsyncMock()
+    session.commit = AsyncMock()
+    session.scalar = AsyncMock(
+        side_effect=[
+            DENIAL_THRESHOLD,
+            SecurityIncident(
+                tenant_id="tenant-a",
+                device_id="device-a",
+                session_id="session-a",
+                status="open",
+                reason="denial threshold",
+            ),
+            security_session,
+        ]
+    )
+
+    await record_security_event(
+        session,
+        SecurityContext(
+            tenant_id="tenant-a",
+            user_id=7,
+            device_id="device-a",
+            role="traveler",
+            mfa_verified=True,
+            session_id="session-b",
+        ),
+        action="trip.read",
+        resource="trip:999999",
+        decision="deny",
+        reason="resource does not exist or is not visible",
+    )
+
+    assert security_session.revoked_at is not None

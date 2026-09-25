@@ -45,6 +45,7 @@ from app.schemas import (
 )
 from app.services.flight_search import FlightSearchService, flight_provider_name
 from app.security import authorize, enforce_api_segment, require_owned_trip
+from app.request_context import correlation_id
 
 router = APIRouter(
     prefix="/api",
@@ -67,11 +68,12 @@ _NOT_FOUND_OR_RATE_LIMITED: dict[int | str, dict[str, Any]] = {
 @router.post("/trips", response_model=TripRequestOut, responses=_VALIDATION)
 async def create_trip(
     body: TripRequestCreate,
+    request: Request,
     session: AsyncSession = Depends(get_session),
     user: User = Depends(get_current_user),
     context: SecurityContext = Depends(get_security_context),
 ) -> TripRequestOut:
-    await authorize(context, session, action="trip.create", resource="trip", request=None)
+    await authorize(context, session, action="trip.create", resource="trip", request=request)
     assert user.id is not None, "get_current_user must always return a persisted user"
     trip = await repository.create_trip(session, user.id, body)
     return TripRequestOut.model_validate(trip)
@@ -79,11 +81,12 @@ async def create_trip(
 
 @router.get("/trips", response_model=list[TripRequestOut])
 async def list_trips(
+    request: Request,
     session: AsyncSession = Depends(get_session),
     user: User = Depends(get_current_user),
     context: SecurityContext = Depends(get_security_context),
 ) -> list[TripRequestOut]:
-    await authorize(context, session, action="trip.read", resource="trips")
+    await authorize(context, session, action="trip.read", resource="trips", request=request)
     assert user.id is not None, "get_current_user must always return a persisted user"
     trips = await repository.list_trips(session, user.id)
     return [TripRequestOut.model_validate(trip) for trip in trips]
@@ -175,7 +178,9 @@ async def plan_trip(
 ) -> PlanOut:
     await authorize(context, session, action="trip.plan", resource=f"trip:{trip_id}", request=request)
     await require_owned_trip(session, context, trip_id, request)
-    output = await repository.get_or_create_itinerary(session, trip_id, run_planner_durable)
+    output = await repository.get_or_create_itinerary(
+        session, trip_id, lambda trip_id, prompt: run_planner_durable(trip_id, prompt, correlation_id())
+    )
     if isinstance(output, PlanTooComplexOut):
         return output
     if isinstance(output, ClarificationOut):
