@@ -11,13 +11,12 @@ and propose flights, but it has no tool that can approve or execute booking stat
 
 ## Zero-trust enterprise network extension
 
-TravelOps also provides a runnable zero-trust architecture demonstration. The browser, API,
-agent, database, connector, and security-operations surfaces are modeled as protected network
-segments. Signed access tokens carry tenant, role, device, and an MFA assertion; security-operations
-actions require that assertion for an operator. The `/api/security/events` endpoint exposes structured
-allow/deny decisions. Existing booking cancellation and the disabled-identity field provide the
-application's incident-response control; a production deployment would connect these actions to
-an incident-management system. Security events are append-only at the database layer.
+TravelOps also provides a runnable zero-trust architecture demonstration. Protected API routes
+require a signed identity and device context when zero-trust enforcement is enabled. Every
+authenticated web-to-API request records its security decision. Existing booking cancellation
+and the disabled-identity field provide the application's incident-response control; a production
+deployment would connect these actions to an incident-management system. Security events are
+append-only at the database layer.
 
 Set `ZERO_TRUST_ENFORCED=true` to require a bearer token on protected API routes. The local
 development token format is intentionally deterministic for the classroom demonstration and does

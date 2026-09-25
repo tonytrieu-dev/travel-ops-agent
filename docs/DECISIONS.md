@@ -94,24 +94,17 @@ allow_cross_trip_cache=True`); the planner's tool call is deliberately more cons
 planning run, not a user-facing catalog browse — see the entry right below for where that shared
 logic actually lives.
 
-## Flight search and execution-run lifecycle are extracted services, not inline route/tool logic
-`FlightSearchService` (`app/services/flight_search.py`) and `ExecutionService`/`ExecutionRun`
-(`app/agent/execution_log.py`) sit behind `POST /api/trips/{trip_id}/flights/search`, the
-planner's `search_flights` tool, and the DBOS-wrapped planner run. **Alternative:** leave the
-caching, persistence, and ordering logic inline in `routes/trips.py` and `agent/planner.py`, as it
-originally was. **Rejected** — the
+## Flight search is an extracted service, not duplicated route/tool logic
+`FlightSearchService` (`app/services/flight_search.py`) sits behind
+`POST /api/trips/{trip_id}/flights/search` and the planner's `search_flights` tool.
+**Alternative:** leave the caching, persistence, and ordering logic inline in `routes/trips.py`
+and `agent/planner.py`, as it originally was. **Rejected** — the
 route and the planner tool need the *same* cheapest-first/cache/round-trip-completeness behavior
 (same-trip TTL reuse, cross-trip identical-search reuse, explicit unavailable results) and had
 drifted into two near-duplicate implementations; one service parameterized by
 `persist`/`allow_cross_trip_cache` is the single place that logic can be verified once
 (`test_route_and_planner_tool_modes_agree_on_offer_ordering_and_shape` pins the two callers can't
-silently diverge again). Same reasoning for `ExecutionService`: before the extraction, the DBOS
-workflow and its failure-path cleanup had two separate ways to finalize an `AgentRun`
-(`persist_agent_run` called directly from two branches); `ExecutionRun.persist_result` is now the
-one path, so `_persist_failed_run` and the success path can't fall out of sync on what "finalized"
-means. Both extractions were scoped to change no observable behavior — the full plan and
-task-by-task TDD trail live in
-`docs/superpowers/plans/2026-07-24-flight-search-execution-services.md`.
+silently diverge again).
 
 ## The agent has only two read-only tools
 Only `search_flights` and `web_search` are registered on the planner, both with strict JSON

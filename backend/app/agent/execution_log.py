@@ -10,12 +10,10 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
-from pydantic_ai.usage import RunUsage
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
-from app.agent.observability import persist_agent_run
 from app.models import AgentRun, ExecutionEvent, ExecutionEventKind, TripRequest, utcnow
 
 
@@ -124,38 +122,3 @@ async def record_event(
             )
         )
         await context.session.commit()
-
-
-@dataclass
-class ExecutionRun:
-    """The narrow surface callers need once bound inside an ExecutionService run — everything
-    else (ContextVar plumbing, event-sequence allocation, per-run locking) stays hidden in
-    execution_context()."""
-
-    agent_run: AgentRun | None
-
-    async def persist_result(
-        self, *, message_history: list[Any], usage: RunUsage, status: str = "completed"
-    ) -> AgentRun:
-        context = _bound_context("ExecutionRun.persist_result")
-        return await persist_agent_run(
-            context.session,
-            trip_request_id=context.trip_request_id,
-            model=context.agent_run.model if context.agent_run is not None else "unknown",
-            message_history=message_history,
-            usage=usage,
-            status=status,
-            agent_run=context.agent_run,
-        )
-
-
-class ExecutionService:
-    def __init__(self, session: AsyncSession) -> None:
-        self._session = session
-
-    @asynccontextmanager
-    async def start_run(
-        self, trip_id: int, *, model: str | None = None
-    ) -> AsyncIterator[ExecutionRun]:
-        async with execution_context(self._session, trip_id, run_model=model) as agent_run:
-            yield ExecutionRun(agent_run=agent_run)

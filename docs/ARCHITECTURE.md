@@ -23,21 +23,19 @@ flowchart LR
 
 ## Zero-trust enterprise-network overlay
 
-The application is a small enterprise-network simulation with six logical segments:
-`web`, `api`, `agent`, `data`, `connector`, and `security-operations`. The zero-trust overlay
-does not trust a request because it came from an internal segment. A request carries a signed
-identity and device context, and the server evaluates tenant, role, device status, MFA status,
-and the allowed segment path before a sensitive operation.
+The application is a small zero-trust API-boundary simulation. A request carries a signed
+identity and device context, and the server checks tenant, role, device status, and MFA status
+before admitting it from the web boundary to protected API routes.
 
 The security control plane implements the course's five required areas:
 
 - **Identity and access management:** tenant, role, device, and disabled-identity attributes are
   persisted and checked server-side.
-- **MFA:** security-operations actions require an MFA-verified access context. The local demo
-  validates an issuer-supplied assertion; it does not implement a second-factor challenge.
-- **Micro-segmentation:** service paths are an explicit allowlist rather than an implicit
-  internal-network trust.
-- **Continuous monitoring:** every security decision can be persisted as an append-only
+- **MFA:** the local demo validates an issuer-supplied assertion; it does not implement a
+  second-factor challenge.
+- **API segmentation:** protected routes admit authenticated web requests through one explicit
+  boundary rather than assuming internal-network trust.
+- **Continuous monitoring:** each admitted request is persisted as an append-only
   `security_event` with actor, device, segments, action, decision, reason, and correlation ID.
 - **Incident response:** identity disablement and booking cancellation provide containment actions;
   security events preserve the evidence needed for an operator or external incident-management
@@ -151,10 +149,8 @@ Five patterns are used explicitly. This section maps each pattern to the code;
    this application does not perform. `execute_booking` separates the external fetch from the
    state transition, leaving a clear extension point if the workflow grows.
 
-`FlightSearchService`/`ExecutionService` (see "Flight search and execution-run lifecycle are
-extracted services" in DECISIONS.md) are a sixth, smaller pattern in the same family — extracting
-duplicated logic behind one interface — but weren't part of the original five; they're a
-refactor-era addition once the duplication became real, not a pattern picked up front.
+`FlightSearchService` is a smaller pattern in the same family: it extracts duplicated flight
+search behavior shared by the route and planner tool.
 
 ## APIs & AI protocols
 
@@ -205,7 +201,7 @@ refactor-era addition once the duplication became real, not a pattern picked up 
 (`get_or_create_itinerary` returns an existing `Itinerary` row as-is). Otherwise it calls
 `run_planner_durable` (`app/dbos_runtime.py`), which acquires a concurrency slot
 (`acquire_agent_run_slot`, caps concurrent real LLM calls) and runs the `@DBOS.workflow`-wrapped
-planner: `ExecutionService(session).start_run(...)` binds an `ExecutionRun` for the trip, then
+planner: `execution_context(...)` binds an `AgentRun` for the trip, then
 `agent.iter(...)` drives a ReAct-style loop over `search_flights`/`web_search`, capped by
 `MAX_TOOL_STEPS`/`MAX_CONTEXT_TOKENS`. The agent's own structured output is `ItineraryOut |
 ClarificationOut` — a `ClarificationOut` returns questions without persisting an itinerary; an
@@ -215,11 +211,9 @@ catches `UsageLimitExceeded` around that call and turns it into a `PlanTooComple
   return is the wider
 `PlannerOutput` union (`ItineraryOut | ClarificationOut | PlanTooComplexOut`, `app/schemas.py`).
 Every tool call records an `ExecutionEvent`
-through the bound run, and `ExecutionRun.persist_result` (wrapping `persist_agent_run`) derives
+through the bound context, and `persist_agent_run` derives
 `AgentRun`/`AgentRunStep` rows from captured message history and usage on both the success and
-handled crash-recovery failure paths — `ExecutionService`/`ExecutionRun`
-(`app/agent/execution_log.py`) is the one place that finalizes a run, so there's exactly one
-finalization path to reason about, not two. The concurrency slot releases in a `finally`, outside
+handled crash-recovery failure paths. The concurrency slot releases in a `finally`, outside
 the DBOS-wrapped call — see [DECISIONS.md](DECISIONS.md) for why that placement matters.
 `POST /api/trips/{trip_id}/flights/search` (outside the agent loop) still binds its own run through
 the lower-level `execution_context()` directly, since it isn't wrapped in a DBOS workflow.

@@ -1,20 +1,17 @@
+import base64
+import hashlib
+import hmac
+import json
 from datetime import UTC, datetime
 
 import pytest
 from fastapi import HTTPException
 
 from app.config import Settings
-from app.dependencies import _context_from_claims, _decode_token, create_access_token
+from app.dependencies import _context_from_claims, _decode_token
 from app.models import User
-from app.security import segment_path_allowed
 
 pytestmark = pytest.mark.no_database
-
-
-def test_zero_trust_segment_policy_allows_declared_and_denies_undeclared_paths() -> None:
-    assert segment_path_allowed("web", "api")
-    assert segment_path_allowed("api", "data")
-    assert not segment_path_allowed("agent", "connector")
 
 
 def test_zero_trust_accepts_matching_identity_claims() -> None:
@@ -103,14 +100,22 @@ def test_zero_trust_rejects_default_signing_secret_when_enabled() -> None:
 
 
 def test_zero_trust_rejects_tampered_access_token() -> None:
-    token = create_access_token(
-        user_id=7,
-        tenant_id="tenant-a",
-        device_id="device-a",
-        role="traveler",
-        mfa_verified=False,
-    )
-    payload, signature = token.rsplit(".", 1)
+    payload = base64.urlsafe_b64encode(
+        json.dumps(
+            {
+                "user_id": 7,
+                "tenant_id": "tenant-a",
+                "device_id": "device-a",
+                "role": "traveler",
+                "mfa_verified": False,
+                "expires_at": int(datetime.now(UTC).timestamp()) + 60,
+            },
+            separators=(",", ":"),
+        ).encode()
+    ).decode().rstrip("=")
+    signature = hmac.new(
+        b"local-development-only", payload.encode(), hashlib.sha256
+    ).hexdigest()
     replacement = "0" if signature[-1] != "0" else "1"
     tampered = f"{payload}.{signature[:-1]}{replacement}"
     with pytest.raises(HTTPException, match="invalid zero-trust access token"):

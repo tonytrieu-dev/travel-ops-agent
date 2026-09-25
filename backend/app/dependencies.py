@@ -71,28 +71,23 @@ def _decode_token(token: str, secret: str) -> dict[str, object]:
         raise HTTPException(status_code=401, detail="invalid zero-trust access token") from None
 
 
-def create_access_token(
-    *, user_id: int, tenant_id: str, device_id: str, role: str, mfa_verified: bool
-) -> str:
-    payload = base64.urlsafe_b64encode(
-        json.dumps(
-            {
-                "user_id": user_id,
-                "tenant_id": tenant_id,
-                "device_id": device_id,
-                "role": role,
-                "mfa_verified": mfa_verified,
-                "expires_at": int(time.time()) + 900,
-            },
-            separators=(",", ":"),
-        ).encode()
-    ).decode().rstrip("=")
-    signature = hmac.new(
-        get_settings().zero_trust_signing_secret.get_secret_value().encode(),
-        payload.encode(),
-        hashlib.sha256,
-    ).hexdigest()
-    return f"{payload}.{signature}"
+async def _authenticated_identity(
+    authorization: str,
+    session: AsyncSession,
+) -> tuple[User, SecurityContext]:
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="bearer token required")
+    claims = _decode_token(
+        authorization.removeprefix("Bearer "),
+        get_settings().zero_trust_signing_secret.get_secret_value(),
+    )
+    user_id = claims.get("user_id")
+    if not isinstance(user_id, int):
+        raise HTTPException(status_code=401, detail="invalid user identity")
+    user = await session.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=403, detail="identity is disabled or unknown")
+    return user, _context_from_claims(claims, user)
 
 
 async def get_current_user(
@@ -100,19 +95,7 @@ async def get_current_user(
     session: AsyncSession = Depends(get_session),
 ) -> User:
     if authorization is not None:
-        if not authorization.startswith("Bearer "):
-            raise HTTPException(status_code=401, detail="bearer token required")
-        claims = _decode_token(
-            authorization.removeprefix("Bearer "),
-            get_settings().zero_trust_signing_secret.get_secret_value(),
-        )
-        user_id = claims.get("user_id")
-        if not isinstance(user_id, int):
-            raise HTTPException(status_code=401, detail="invalid user identity")
-        user = await session.get(User, user_id)
-        if user is None:
-            raise HTTPException(status_code=403, detail="identity is disabled or unknown")
-        _context_from_claims(claims, user)
+        user, _ = await _authenticated_identity(authorization, session)
         return user
     user = await session.scalar(select(User).where(col(User.email) == DEMO_USER_EMAIL))
     if user is not None:
@@ -134,16 +117,5 @@ async def get_security_context(
         user = await get_current_user(session=session)
         assert user.id is not None
         return SecurityContext(user.tenant_id, user.id, user.device_id, user.role, True)
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="bearer token required")
-    claims = _decode_token(
-        authorization.removeprefix("Bearer "),
-        settings.zero_trust_signing_secret.get_secret_value(),
-    )
-    user_id = claims.get("user_id")
-    if not isinstance(user_id, int):
-        raise HTTPException(status_code=401, detail="invalid user identity")
-    user = await session.get(User, user_id)
-    if user is None:
-        raise HTTPException(status_code=403, detail="identity is disabled or unknown")
-    return _context_from_claims(claims, user)
+    _, context = await _authenticated_identity(authorization, session)
+    return context

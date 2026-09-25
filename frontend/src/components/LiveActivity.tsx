@@ -1,5 +1,6 @@
-import { useState } from "react"
-import { useTripExecution } from "../hooks/useTripExecution"
+import { useMemo, useState } from "react"
+import { getTripExecution } from "../api/client"
+import { usePolledResource } from "../hooks/usePolledResource"
 import { RunStatusDot } from "./RunStatusDot"
 
 interface LiveActivityProps {
@@ -19,7 +20,12 @@ function labelFor(name: string): string {
 // Always polling once a trip exists (not just while a run is active) so this reads as a live
 // activity log, not a banner that vanishes between runs.
 export function LiveActivity({ tripId, isRunActive }: LiveActivityProps) {
-  const { panelData } = useTripExecution({ tripId, enabled: true, isRunActive })
+  const fetcher = useMemo(() => () => getTripExecution(tripId), [tripId])
+  const { data: panelData } = usePolledResource({
+    fetcher,
+    isRunActive,
+    errorText: "Could not load execution data.",
+  })
   const [clearedBeforeSeq, setClearedBeforeSeq] = useState(0)
 
   const events = (panelData?.events ?? []).filter((event) => event.seq > clearedBeforeSeq)
