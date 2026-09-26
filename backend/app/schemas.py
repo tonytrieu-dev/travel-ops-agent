@@ -58,6 +58,9 @@ class ErrorCode(StrEnum):
     VALIDATION_ERROR = "validation_error"
     RATE_LIMIT_EXCEEDED = "rate_limit_exceeded"
     CONNECTOR_NOT_CONFIGURED = "connector_not_configured"
+    FORBIDDEN = "forbidden"
+    AUTHENTICATION_REQUIRED = "authentication_required"
+    INCIDENT_CONTAINED = "incident_contained"
 
 
 def validate_trip_dates(depart_date: str, return_date: str | None) -> None:
@@ -115,6 +118,7 @@ class BookingTransitionOut(BaseModel):
     from_state: BookingState
     to_state: BookingState
     reason: str
+    correlation_id: str
     actor_user_id: int | None = None
     # Resolved for display so an audit reader sees who decided, not a raw foreign key. Null for a
     # system action (a TTL expiry has no actor) and for an anonymized user, whose audit rows
@@ -333,6 +337,7 @@ class ExecutionEventOut(BaseModel):
     detail: str
     duration_ms: int | None = None
     data: dict[str, Any] | None = None
+    correlation_id: str
     created_at: UtcDatetime
 
 
@@ -369,3 +374,65 @@ class GlobalExecutionPanelOut(BaseModel):
 
 class SlackAuthErrorOut(BaseModel):
     detail: str
+
+
+class LoginRequest(BaseModel):
+    email: str
+    device_id: str = Field(min_length=1, max_length=100)
+    password: str = Field(min_length=1, max_length=200)
+
+
+class MfaVerifyRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    code: str = Field(pattern=r"^\d{6}$")
+
+
+class TokenOut(BaseModel):
+    access_token: str
+    token_type: Literal["Bearer"] = "Bearer"
+    expires_at: UtcDatetime
+    session_id: str
+    mfa_required: bool
+
+
+class SecurityEventOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    tenant_id: str
+    actor_user_id: int | None
+    device_id: str
+    session_id: str | None
+    source_segment: str
+    target_segment: str
+    action: str
+    resource: str
+    decision: str
+    reason: str
+    correlation_id: str
+    created_at: UtcDatetime
+
+
+class SecurityIncidentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    tenant_id: str
+    actor_user_id: int | None
+    device_id: str
+    session_id: str | None
+    reason: str
+    status: str
+    created_at: UtcDatetime
+    contained_at: UtcDatetime | None
+
+
+class SecurityEventQuery(BaseModel):
+    actor_user_id: int | None = None
+    decision: Literal["allow", "deny"] | None = None
+    action: str | None = None
+    since: datetime | None = None
+
+
+class ServiceHeartbeatOut(BaseModel):
+    status: Literal["ok"] = "ok"

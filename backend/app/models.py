@@ -6,6 +6,7 @@ and no agent, can edit or delete a row once written.
 """
 
 from datetime import UTC, datetime
+from uuid import uuid4
 from enum import StrEnum
 from typing import Any
 
@@ -62,7 +63,62 @@ class User(SQLModel, table=True):
     # Nullable so a right-to-erasure request can null the email (anonymize) while leaving the
     # append-only audit rows, which reference user_id only, fully intact.
     email: str | None = Field(default=None, unique=True, index=True)
+    tenant_id: str = Field(default="demo-tenant", index=True)
+    role: str = Field(default="traveler")
+    device_id: str = Field(default="demo-device")
+    mfa_enabled: bool = Field(default=True)
+    disabled: bool = Field(default=False)
+    totp_secret: str = Field(default="JBSWY3DPEHPK3PXP")
+    password_hash: str = Field(default="")
     created_at: datetime = Field(default_factory=utcnow)
+
+
+class SecuritySession(SQLModel, table=True):
+    __tablename__ = "security_session"
+
+    id: int | None = Field(default=None, primary_key=True)
+    session_id: str = Field(default_factory=lambda: uuid4().hex, unique=True, index=True)
+    user_id: int = Field(foreign_key="user_account.id", index=True)
+    tenant_id: str = Field(index=True)
+    device_id: str = Field(index=True)
+    mfa_verified: bool = False
+    expires_at: datetime
+    revoked_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class SecurityEvent(SQLModel, table=True):
+    """Append-only zero-trust decision record for monitoring and incident response."""
+
+    __tablename__ = "security_event"
+
+    id: int | None = Field(default=None, primary_key=True)
+    tenant_id: str = Field(index=True)
+    actor_user_id: int | None = Field(default=None, foreign_key="user_account.id", index=True)
+    session_id: str | None = Field(default=None, index=True)
+    device_id: str
+    source_segment: str
+    target_segment: str
+    action: str
+    resource: str
+    decision: str = Field(index=True)
+    reason: str
+    correlation_id: str = Field(index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class SecurityIncident(SQLModel, table=True):
+    __tablename__ = "security_incident"
+
+    id: int | None = Field(default=None, primary_key=True)
+    tenant_id: str = Field(index=True)
+    actor_user_id: int | None = Field(default=None, foreign_key="user_account.id", index=True)
+    device_id: str = Field(index=True)
+    session_id: str | None = Field(default=None, index=True)
+    reason: str
+    status: str = Field(default="open", index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+    contained_at: datetime | None = None
 
 
 class TripRequest(SQLModel, table=True):
@@ -169,6 +225,7 @@ class BookingTransition(SQLModel, table=True):
     to_state: BookingState
     actor_user_id: int | None = Field(default=None, foreign_key="user_account.id")
     reason: str
+    correlation_id: str = Field(default_factory=lambda: uuid4().hex, index=True)
     created_at: datetime = Field(default_factory=utcnow)
 
 
@@ -188,6 +245,7 @@ class ExecutionEvent(SQLModel, table=True):
     detail: str
     duration_ms: int | None = None
     data: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    correlation_id: str = Field(default_factory=lambda: uuid4().hex, index=True)
     created_at: datetime = Field(default_factory=utcnow)
 
 

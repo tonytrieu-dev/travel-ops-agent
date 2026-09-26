@@ -35,12 +35,14 @@ os.environ.setdefault("DATABASE_URL", TEST_DATABASE_URL)
 
 _ALL_TABLES = (
     "booking_transition, execution_event, agent_run_step, agent_run, hitl_booking_log, "
-    "itinerary, flight_search_result, trip_request, user_account, connector_setting"
+    "itinerary, flight_search_result, trip_request, user_account, connector_setting, security_event, security_session, security_incident"
 )
 
 
 @pytest.fixture(autouse=True)
-def _truncate_between_tests() -> None:
+def _truncate_between_tests(request: pytest.FixtureRequest) -> None:
+    if request.node.get_closest_marker("no_database") is not None:
+        return
     async def _truncate(session: AsyncSession) -> None:
         await session.execute(text(f"TRUNCATE {_ALL_TABLES} RESTART IDENTITY CASCADE"))
 

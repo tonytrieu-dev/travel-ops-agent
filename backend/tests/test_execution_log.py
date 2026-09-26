@@ -3,13 +3,16 @@ run and resume correctly across multiple runs on the same trip.
 """
 
 import asyncio
+from unittest.mock import MagicMock
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlmodel import col
 
 from app.agent.execution_log import execution_context, record_event
 from app.models import ExecutionEvent, ExecutionEventKind
+from app.request_context import bind_correlation_id, correlation_id
 from tests.db_helpers import TEST_DATABASE_URL, run_db, seed_trip
 
 
@@ -20,6 +23,16 @@ async def _events_for(session, trip_id: int) -> list[ExecutionEvent]:
         .order_by(col(ExecutionEvent.seq))
     )
     return list(result.scalars())
+
+
+@pytest.mark.no_database
+async def test_execution_context_inherits_request_correlation_unless_explicitly_overridden() -> None:
+    with bind_correlation_id("request-correlation"):
+        async with execution_context(MagicMock(), 1):
+            assert correlation_id() == "request-correlation"
+        async with execution_context(MagicMock(), 1, correlation="workflow-correlation"):
+            assert correlation_id() == "workflow-correlation"
+        assert correlation_id() == "request-correlation"
 
 
 def test_recorded_data_survives_as_the_real_structured_payload_not_just_the_detail_string() -> None:

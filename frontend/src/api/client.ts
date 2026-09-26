@@ -13,7 +13,39 @@ import type {
   TripRequestUpdate,
 } from "./types"
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000/api"
+const API_BASE_URL = import.meta.env?.VITE_API_BASE_URL ?? "http://localhost:8000/api"
+const ACCESS_TOKEN_STORAGE_KEY = "travel-agent.verifiedAccessToken"
+const ACCESS_TOKEN_EXPIRATION_STORAGE_KEY = "travel-agent.verifiedAccessTokenExpiresAt"
+export const AUTHENTICATION_REQUIRED_EVENT = "travel-agent:authentication-required"
+
+export type LoginResult = {
+  access_token: string
+  expires_at: string
+  session_id: string
+  mfa_required: boolean
+}
+
+export type AuthConfig = { enforced: boolean }
+
+function clearCredentials(): void {
+  localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY)
+  localStorage.removeItem(ACCESS_TOKEN_EXPIRATION_STORAGE_KEY)
+}
+
+export function getAccessToken(): string | null {
+  const accessToken = localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY)
+  const expiresAt = localStorage.getItem(ACCESS_TOKEN_EXPIRATION_STORAGE_KEY)
+  const expiration = Date.parse(expiresAt ?? "")
+  if (!accessToken || !Number.isFinite(expiration) || expiration <= Date.now()) {
+    clearCredentials()
+    return null
+  }
+  return accessToken
+}
+
+export function getAuthConfig(): Promise<AuthConfig> {
+  return request<AuthConfig>("/auth/config")
+}
 
 export class ApiError extends Error {
   code: ProblemDetail["code"]
@@ -27,20 +59,49 @@ export class ApiError extends Error {
 }
 
 async function request<TResponse>(path: string, options?: RequestInit): Promise<TResponse> {
+  const accessToken = getAccessToken()
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...options,
     headers: {
       "Content-Type": "application/json",
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       ...options?.headers,
     },
   })
 
+  if (response.status === 401) {
+    clearCredentials()
+    window.dispatchEvent(new Event(AUTHENTICATION_REQUIRED_EVENT))
+  }
   if (!response.ok) {
     const problemDetail = (await response.json()) as ProblemDetail
     throw new ApiError(problemDetail, response.status)
   }
 
   return (await response.json()) as TResponse
+}
+
+export async function login(email: string, password: string, device_id: string): Promise<LoginResult> {
+  const result = await request<LoginResult>("/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ email, password, device_id }),
+  })
+  if (!result.mfa_required) storeCredentials(result)
+  return result
+}
+
+export async function verifyMfa(session_id: string, code: string): Promise<LoginResult> {
+  const result = await request<LoginResult>("/auth/mfa", {
+    method: "POST",
+    body: JSON.stringify({ session_id, code }),
+  })
+  storeCredentials(result)
+  return result
+}
+
+function storeCredentials(result: LoginResult): void {
+  localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, result.access_token)
+  localStorage.setItem(ACCESS_TOKEN_EXPIRATION_STORAGE_KEY, result.expires_at)
 }
 
 export function createTrip(tripRequestCreate: TripRequestCreate): Promise<TripRequestOut> {

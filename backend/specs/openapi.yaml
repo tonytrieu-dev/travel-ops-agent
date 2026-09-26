@@ -398,6 +398,33 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
 
+  /api/auth/login:
+    post:
+      operationId: login
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/LoginRequest' } } } }
+      responses: { '200': { description: Access token }, '429': { description: Too many login attempts }, '422': { description: Validation error } }
+  /api/auth/mfa:
+    post:
+      operationId: verify_mfa
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/MfaVerifyRequest' } } } }
+      responses: { '200': { description: MFA verified }, '422': { description: Validation error } }
+  /api/security/events:
+    get:
+      operationId: list_security_events
+      responses: { '200': { description: Tenant-scoped security events }, '422': { description: Validation error } }
+  /api/security/incidents:
+    get:
+      operationId: list_incidents
+      responses: { '200': { description: Tenant-scoped incidents }, '422': { description: Validation error } }
+  /api/security/sessions/{session_id}/revoke:
+    post:
+      operationId: revoke_session
+      responses: { '200': { description: Session revoked }, '422': { description: Validation error } }
+  /internal/agent/heartbeat:
+    post:
+      operationId: agent_heartbeat
+      responses: { '200': { description: Trusted service accepted }, '401': { description: Invalid service token } }
+
 components:
   schemas:
     BookingState:
@@ -407,7 +434,7 @@ components:
     ErrorCode:
       type: string
       description: Machine-readable failure code; the human explanation is in `detail`.
-      enum: [booking_not_found, trip_not_found, flight_not_found, booking_expired, invalid_transition, validation_error, rate_limit_exceeded, connector_not_configured]
+      enum: [booking_not_found, trip_not_found, flight_not_found, booking_expired, invalid_transition, validation_error, rate_limit_exceeded, connector_not_configured, forbidden, authentication_required, incident_contained]
 
     BookingRequestCreate:
       type: object
@@ -417,13 +444,14 @@ components:
 
     BookingTransitionOut:
       type: object
-      required: [from_state, to_state, reason, created_at]
+      required: [from_state, to_state, reason, correlation_id, created_at]
       properties:
         from_state: { $ref: '#/components/schemas/BookingState' }
         to_state: { $ref: '#/components/schemas/BookingState' }
         reason: { type: string }
         actor_user_id: { type: [integer, 'null'] }
         actor_email: { type: [string, 'null'] }
+        correlation_id: { type: string }
         created_at: { type: string, format: date-time }
 
     BookingLogOut:
@@ -656,7 +684,7 @@ components:
 
     ExecutionEventOut:
       type: object
-      required: [seq, kind, name, status, detail, created_at]
+      required: [seq, kind, name, status, detail, correlation_id, created_at]
       properties:
         seq: { type: integer }
         kind: { $ref: '#/components/schemas/ExecutionEventKind' }
@@ -666,6 +694,7 @@ components:
         detail: { type: string }
         duration_ms: { type: [integer, 'null'] }
         data: { type: [object, 'null'] }
+        correlation_id: { type: string }
         created_at: { type: string, format: date-time }
 
     ExecutionPanelOut:
@@ -711,3 +740,18 @@ components:
       required: [enabled]
       properties:
         enabled: { type: boolean }
+
+    LoginRequest:
+      type: object
+      required: [email, device_id, password]
+      properties:
+        email: { type: string }
+        device_id: { type: string }
+        password: { type: string }
+
+    MfaVerifyRequest:
+      type: object
+      required: [session_id, code]
+      properties:
+        session_id: { type: string }
+        code: { type: string }

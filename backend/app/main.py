@@ -6,6 +6,8 @@ handler can stay thin and no stack trace or internal ever leaks to the client.
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+import logging
+from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -17,9 +19,13 @@ from app.dbos_runtime import launch_dbos, shutdown_dbos
 from app.rate_limit import RateLimitError
 from app.repositories.booking_repository import BookingError
 from app.repositories.trips_repository import TripError
-from app.routes import booking, connectors, slack, trips
+from app.routes import auth, booking, connectors, security, service, slack, trips
+from app.request_context import bind_correlation_id
 from app.routes.connectors import ConnectorError
 from app.schemas import ErrorCode, ProblemDetail
+from app.security import SecurityError
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -38,8 +44,28 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    @app.middleware("http")
+    async def correlation_id(request: Request, call_next):
+        request.state.correlation_id = request.headers.get("x-correlation-id") or str(uuid4())
+        with bind_correlation_id(request.state.correlation_id):
+            try:
+                response = await call_next(request)
+            except Exception:
+                logger.exception(
+                    "Unhandled request exception correlation_id=%s",
+                    request.state.correlation_id,
+                )
+                response = JSONResponse(
+                    status_code=500,
+                    content={"detail": "Internal server error"},
+                )
+        response.headers["x-correlation-id"] = request.state.correlation_id
+        return response
     app.include_router(booking.router)
+    app.include_router(auth.router)
     app.include_router(connectors.router)
+    app.include_router(security.router)
+    app.include_router(service.router)
     app.include_router(slack.router)
     app.include_router(trips.router)
 
@@ -60,6 +86,11 @@ def create_app() -> FastAPI:
             content=problem.model_dump(mode="json"),
             headers={"Retry-After": str(error.retry_after_seconds)},
         )
+
+    @app.exception_handler(SecurityError)
+    async def _render_security_error(request: Request, error: SecurityError) -> JSONResponse:
+        problem = ProblemDetail(code=ErrorCode.FORBIDDEN, detail=error.detail)
+        return JSONResponse(status_code=error.status_code, content=problem.model_dump(mode="json"))
 
     @app.exception_handler(RequestValidationError)
     async def _render_validation_error(

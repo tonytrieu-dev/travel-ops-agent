@@ -21,6 +21,27 @@ flowchart LR
     Slack -->|/api/slack/interactions| API
 ```
 
+## Zero-trust enterprise-network overlay
+
+The application is a small, container-friendly zero-trust API-boundary demonstration. A request
+carries a short-lived signed identity bound to a server-side session and device; the API checks
+tenant, role, MFA, revocation, and resource ownership before admitting it from the web boundary.
+
+The security control plane implements the course's five required areas:
+
+- **Identity and access management:** tenant, role, device, and disabled-identity attributes are
+  persisted and checked server-side.
+- **MFA:** the local demo upgrades a pending session only after validating a TOTP code.
+- **API segmentation:** protected routes admit authenticated web requests through one explicit
+  boundary rather than assuming internal-network trust.
+- **Continuous monitoring:** each admitted request is persisted as an append-only
+  `security_event` with actor, device, segments, action, decision, reason, and correlation ID.
+- **Incident response:** repeated denials create an incident and revoke the affected session;
+  security operators can revoke sessions or disable identities, with the evidence retained.
+
+This is an application-level and container-friendly demonstration, not a claim that FastAPI
+replaces a production firewall, service mesh, enterprise IdP, or hardware MFA.
+
 The backend is a single FastAPI process. The frontend is a separate static SPA that talks to it
 over REST; there is no server-rendered coupling between them.
 
@@ -126,10 +147,8 @@ Five patterns are used explicitly. This section maps each pattern to the code;
    this application does not perform. `execute_booking` separates the external fetch from the
    state transition, leaving a clear extension point if the workflow grows.
 
-`FlightSearchService`/`ExecutionService` (see "Flight search and execution-run lifecycle are
-extracted services" in DECISIONS.md) are a sixth, smaller pattern in the same family — extracting
-duplicated logic behind one interface — but weren't part of the original five; they're a
-refactor-era addition once the duplication became real, not a pattern picked up front.
+`FlightSearchService` is a smaller pattern in the same family: it extracts duplicated flight
+search behavior shared by the route and planner tool.
 
 ## APIs & AI protocols
 
@@ -180,7 +199,7 @@ refactor-era addition once the duplication became real, not a pattern picked up 
 (`get_or_create_itinerary` returns an existing `Itinerary` row as-is). Otherwise it calls
 `run_planner_durable` (`app/dbos_runtime.py`), which acquires a concurrency slot
 (`acquire_agent_run_slot`, caps concurrent real LLM calls) and runs the `@DBOS.workflow`-wrapped
-planner: `ExecutionService(session).start_run(...)` binds an `ExecutionRun` for the trip, then
+planner: `execution_context(...)` binds an `AgentRun` for the trip, then
 `agent.iter(...)` drives a ReAct-style loop over `search_flights`/`web_search`, capped by
 `MAX_TOOL_STEPS`/`MAX_CONTEXT_TOKENS`. The agent's own structured output is `ItineraryOut |
 ClarificationOut` — a `ClarificationOut` returns questions without persisting an itinerary; an
@@ -190,11 +209,9 @@ catches `UsageLimitExceeded` around that call and turns it into a `PlanTooComple
   return is the wider
 `PlannerOutput` union (`ItineraryOut | ClarificationOut | PlanTooComplexOut`, `app/schemas.py`).
 Every tool call records an `ExecutionEvent`
-through the bound run, and `ExecutionRun.persist_result` (wrapping `persist_agent_run`) derives
+through the bound context, and `persist_agent_run` derives
 `AgentRun`/`AgentRunStep` rows from captured message history and usage on both the success and
-handled crash-recovery failure paths — `ExecutionService`/`ExecutionRun`
-(`app/agent/execution_log.py`) is the one place that finalizes a run, so there's exactly one
-finalization path to reason about, not two. The concurrency slot releases in a `finally`, outside
+handled crash-recovery failure paths. The concurrency slot releases in a `finally`, outside
 the DBOS-wrapped call — see [DECISIONS.md](DECISIONS.md) for why that placement matters.
 `POST /api/trips/{trip_id}/flights/search` (outside the agent loop) still binds its own run through
 the lower-level `execution_context()` directly, since it isn't wrapped in a DBOS workflow.
@@ -247,7 +264,9 @@ for this project; see [DECISIONS.md](DECISIONS.md).
 Optional, off by default. `GET /api/connectors` reads and `PATCH /api/connectors/slack` flips the
 single-row `connector_setting.slack_enabled` toggle, gated so it can only be enabled when
 `SLACK_BOT_TOKEN`/`SLACK_SIGNING_SECRET`/`SLACK_APPROVALS_CHANNEL_ID` are all configured (409
-otherwise). The frontend's Connectors tab (`ConnectorsPanel.tsx`) drives this toggle.
+otherwise). Connector settings are deployment-wide rather than tenant-owned; both endpoints require
+the `security-operator` or `admin` role and verified MFA. The frontend's Connectors tab
+(`ConnectorsPanel.tsx`) drives this toggle.
 
 When enabled, `request_booking` (`routes/booking.py`) additionally posts a Confirm/Reject Block
 Kit message via `notify_pending_approval`; Slack's callback hits `POST /api/slack/interactions`,
