@@ -35,7 +35,7 @@ _DEFAULT_TEST_FITNESS_LEVEL = FitnessLevel.MODERATE
 from app.state import BookingState
 
 TEST_DATABASE_URL = os.environ.get(
-    "DATABASE_URL", "postgresql+asyncpg://tony@localhost:5432/travel_agent_test"
+    "TEST_DATABASE_URL", "postgresql+asyncpg://tony@localhost:5432/travel_agent_test"
 )
 
 _ResultT = TypeVar("_ResultT")

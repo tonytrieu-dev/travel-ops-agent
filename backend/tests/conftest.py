@@ -17,21 +17,23 @@ so app connections (portal loop) and seed connections (seed loop) never cross ev
 import asyncio
 import os
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+TEST_DATABASE_URL = os.environ.get(
+    "TEST_DATABASE_URL", "postgresql+asyncpg://tony@localhost:5432/travel_agent_test"
+)
+database_name = urlparse(TEST_DATABASE_URL).path.rsplit("/", 1)[-1].casefold()
+if "test" not in database_name:
+    raise RuntimeError("TEST_DATABASE_URL must identify a test database")
+os.environ["DATABASE_URL"] = TEST_DATABASE_URL
+
 from app.adapters.flights_searchapi import FlightSearchOutcome, NormalizedFlightOffer
 from app.schemas import ClarificationOut, ItineraryDayOut, ItineraryOut
-from tests.db_helpers import TEST_DATABASE_URL, run_db
-
-# Must run before any ``app.*`` import: ``app.db``/``app.config`` build their engine once from
-# ``DATABASE_URL`` at first import, and ``execute_booking_durable`` (DBOS can't take an injected
-# session) reads that same module-level engine directly, bypassing the FastAPI dependency
-# override below entirely — so the test DB has to be correct at the source, not just at the DI
-# seam.
-os.environ.setdefault("DATABASE_URL", TEST_DATABASE_URL)
+from tests.db_helpers import run_db
 
 _ALL_TABLES = (
     "booking_transition, execution_event, agent_run_step, agent_run, hitl_booking_log, "
