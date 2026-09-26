@@ -13,8 +13,10 @@ import type {
   TripRequestUpdate,
 } from "./types"
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000/api"
+const API_BASE_URL = import.meta.env?.VITE_API_BASE_URL ?? "http://localhost:8000/api"
 const ACCESS_TOKEN_STORAGE_KEY = "travel-agent.verifiedAccessToken"
+const ACCESS_TOKEN_EXPIRATION_STORAGE_KEY = "travel-agent.verifiedAccessTokenExpiresAt"
+export const AUTHENTICATION_REQUIRED_EVENT = "travel-agent:authentication-required"
 
 export type LoginResult = {
   access_token: string
@@ -25,8 +27,20 @@ export type LoginResult = {
 
 export type AuthConfig = { enforced: boolean }
 
+function clearCredentials(): void {
+  localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY)
+  localStorage.removeItem(ACCESS_TOKEN_EXPIRATION_STORAGE_KEY)
+}
+
 export function getAccessToken(): string | null {
-  return localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY)
+  const accessToken = localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY)
+  const expiresAt = localStorage.getItem(ACCESS_TOKEN_EXPIRATION_STORAGE_KEY)
+  const expiration = Date.parse(expiresAt ?? "")
+  if (!accessToken || !Number.isFinite(expiration) || expiration <= Date.now()) {
+    clearCredentials()
+    return null
+  }
+  return accessToken
 }
 
 export function getAuthConfig(): Promise<AuthConfig> {
@@ -55,6 +69,10 @@ async function request<TResponse>(path: string, options?: RequestInit): Promise<
     },
   })
 
+  if (response.status === 401) {
+    clearCredentials()
+    window.dispatchEvent(new Event(AUTHENTICATION_REQUIRED_EVENT))
+  }
   if (!response.ok) {
     const problemDetail = (await response.json()) as ProblemDetail
     throw new ApiError(problemDetail, response.status)
@@ -68,7 +86,7 @@ export async function login(email: string, password: string, device_id: string):
     method: "POST",
     body: JSON.stringify({ email, password, device_id }),
   })
-  if (!result.mfa_required) localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, result.access_token)
+  if (!result.mfa_required) storeCredentials(result)
   return result
 }
 
@@ -77,8 +95,13 @@ export async function verifyMfa(session_id: string, code: string): Promise<Login
     method: "POST",
     body: JSON.stringify({ session_id, code }),
   })
-  localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, result.access_token)
+  storeCredentials(result)
   return result
+}
+
+function storeCredentials(result: LoginResult): void {
+  localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, result.access_token)
+  localStorage.setItem(ACCESS_TOKEN_EXPIRATION_STORAGE_KEY, result.expires_at)
 }
 
 export function createTrip(tripRequestCreate: TripRequestCreate): Promise<TripRequestOut> {

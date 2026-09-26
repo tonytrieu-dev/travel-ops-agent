@@ -402,7 +402,7 @@ paths:
     post:
       operationId: login
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/LoginRequest' } } } }
-      responses: { '200': { description: Access token }, '422': { description: Validation error } }
+      responses: { '200': { description: Access token }, '429': { description: Too many login attempts }, '422': { description: Validation error } }
   /api/auth/mfa:
     post:
       operationId: verify_mfa

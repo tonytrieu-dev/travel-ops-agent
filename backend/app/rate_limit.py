@@ -13,7 +13,7 @@ from app.config import (
     RATE_LIMIT_MAX_REQUESTS,
     RATE_LIMIT_WINDOW_SECONDS,
 )
-from app.schemas import ErrorCode
+from app.schemas import ErrorCode, LoginRequest
 
 _agent_run_lock = asyncio.Lock()
 _agent_runs_in_flight = 0
@@ -31,12 +31,11 @@ class RateLimitError(Exception):
         super().__init__(detail)
 
 
-async def enforce_request_rate_limit(request: Request) -> None:
-    client_ip = request.client.host if request.client else "unknown"
+def _enforce_rate_limit(key: str) -> None:
     now = time.monotonic()
     window_start = now - RATE_LIMIT_WINDOW_SECONDS
 
-    recent = [timestamp for timestamp in _request_timestamps[client_ip] if timestamp > window_start]
+    recent = [timestamp for timestamp in _request_timestamps[key] if timestamp > window_start]
     if len(recent) >= RATE_LIMIT_MAX_REQUESTS:
         raise RateLimitError(
             ErrorCode.RATE_LIMIT_EXCEEDED,
@@ -45,7 +44,16 @@ async def enforce_request_rate_limit(request: Request) -> None:
             retry_after_seconds=RATE_LIMIT_WINDOW_SECONDS,
         )
     recent.append(now)
-    _request_timestamps[client_ip] = recent
+    _request_timestamps[key] = recent
+
+
+async def enforce_request_rate_limit(request: Request) -> None:
+    _enforce_rate_limit(request.client.host if request.client else "unknown")
+
+
+async def enforce_login_rate_limit(body: LoginRequest, request: Request) -> None:
+    client_ip = request.client.host if request.client else "unknown"
+    _enforce_rate_limit(f"login:{client_ip}:{body.email.strip().casefold()}")
 
 
 async def acquire_agent_run_slot() -> None:

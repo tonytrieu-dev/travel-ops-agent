@@ -6,11 +6,13 @@ error code — turns this red before it can surprise a client.
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 from app.main import app
 
 _SPEC_PATH = Path(__file__).resolve().parents[1] / "specs" / "openapi.yaml"
+pytestmark = pytest.mark.no_database
 
 
 def _contract() -> dict:

@@ -6,6 +6,7 @@ handler can stay thin and no stack trace or internal ever leaks to the client.
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+import logging
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
@@ -23,6 +24,8 @@ from app.request_context import bind_correlation_id
 from app.routes.connectors import ConnectorError
 from app.schemas import ErrorCode, ProblemDetail
 from app.security import SecurityError
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -45,7 +48,17 @@ def create_app() -> FastAPI:
     async def correlation_id(request: Request, call_next):
         request.state.correlation_id = request.headers.get("x-correlation-id") or str(uuid4())
         with bind_correlation_id(request.state.correlation_id):
-            response = await call_next(request)
+            try:
+                response = await call_next(request)
+            except Exception:
+                logger.exception(
+                    "Unhandled request exception correlation_id=%s",
+                    request.state.correlation_id,
+                )
+                response = JSONResponse(
+                    status_code=500,
+                    content={"detail": "Internal server error"},
+                )
         response.headers["x-correlation-id"] = request.state.correlation_id
         return response
     app.include_router(booking.router)

@@ -1,8 +1,13 @@
-"""Guards the per-IP rate limit on the two quota-spending routes: the real Nth+1 request over
-the real client, not a value asserted against the limiter's own internals.
-"""
+"""Guards request rate limits through their HTTP boundaries."""
+
+from unittest.mock import AsyncMock, MagicMock
+
+import httpx
+import pytest
 
 from app.config import RATE_LIMIT_MAX_REQUESTS
+from app.db import get_session
+from app.main import app
 from tests.db_helpers import run_db, seed_trip
 
 
@@ -26,3 +31,40 @@ def test_flights_search_is_rate_limited_after_max_requests_from_one_client(clien
     assert "Retry-After" in last_response.headers, (
         "a 429 must tell the client when it's safe to retry"
     )
+
+
+@pytest.mark.no_database
+async def test_repeated_login_failures_are_rate_limited_by_client_and_normalized_email(
+    monkeypatch,
+) -> None:
+    session = MagicMock()
+    session.scalar = AsyncMock(return_value=None)
+
+    async def _session_override():
+        yield session
+
+    app.dependency_overrides[get_session] = _session_override
+    monkeypatch.setattr("app.routes.auth.record_authentication_failure", AsyncMock())
+    transport = httpx.ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            responses = [
+                await client.post(
+                    "/api/auth/login",
+                    json={
+                        "email": "TARGET@EXAMPLE.TEST" if index % 2 else "target@example.test",
+                        "password": "wrong",
+                        "device_id": "guessed-device",
+                    },
+                )
+                for index in range(RATE_LIMIT_MAX_REQUESTS + 1)
+            ]
+    finally:
+        app.dependency_overrides.clear()
+
+    assert [response.status_code for response in responses[:-1]] == [
+        401
+    ] * RATE_LIMIT_MAX_REQUESTS
+    assert responses[-1].status_code == 429
+    assert responses[-1].json()["code"] == "rate_limit_exceeded"
+    assert "Retry-After" in responses[-1].headers

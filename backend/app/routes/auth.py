@@ -16,9 +16,9 @@ from app.dependencies import (
     verify_session_mfa,
 )
 from app.models import SecuritySession, User, utcnow
-from app.schemas import LoginRequest, MfaVerifyRequest, TokenOut
+from app.schemas import LoginRequest, MfaVerifyRequest, ProblemDetail, TokenOut
 from app.security import record_authentication_failure, record_security_event
-from app.rate_limit import enforce_request_rate_limit
+from app.rate_limit import enforce_login_rate_limit, enforce_request_rate_limit
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -28,7 +28,12 @@ async def auth_config() -> dict[str, bool]:
     return {"enforced": get_settings().zero_trust_enforced}
 
 
-@router.post("/login", response_model=TokenOut)
+@router.post(
+    "/login",
+    response_model=TokenOut,
+    responses={429: {"model": ProblemDetail}},
+    dependencies=[Depends(enforce_login_rate_limit)],
+)
 async def login(
     body: LoginRequest, request: Request, session: AsyncSession = Depends(get_session)
 ) -> TokenOut:

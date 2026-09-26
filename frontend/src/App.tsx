@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react"
 import {
+  AUTHENTICATION_REQUIRED_EVENT,
   ApiError,
   createTrip,
   getAccessToken,
@@ -122,6 +123,12 @@ function App() {
   const [planError, setPlanError] = useState<string | null>(null)
 
   const isRunActive = isSearchingFlights || isPlanning
+
+  useEffect(() => {
+    const requireAuthentication = () => window.location.reload()
+    window.addEventListener(AUTHENTICATION_REQUIRED_EVENT, requireAuthentication)
+    return () => window.removeEventListener(AUTHENTICATION_REQUIRED_EVENT, requireAuthentication)
+  }, [])
 
   useEffect(() => {
     getAuthConfig()
