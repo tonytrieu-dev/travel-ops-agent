@@ -37,7 +37,7 @@ def _trip_payload(**overrides: object) -> dict:
         "origin": "JFK",
         "destination": "Paris",
         "destination_airport": "CDG",
-        "depart_date": "2026-08-01",
+        "depart_date": "2030-08-01",
         "age": 30,
         "fitness_level": "moderate",
     }
@@ -47,12 +47,12 @@ def _trip_payload(**overrides: object) -> dict:
 
 @given("a trip request with a depart date next month and no return date")
 def _valid_trip_request(bag: dict) -> None:
-    bag["payload"] = _trip_payload(depart_date="2026-09-01")
+    bag["payload"] = _trip_payload(depart_date="2030-09-01")
 
 
 @given("a trip request whose return date is before its depart date")
 def _return_before_depart(bag: dict) -> None:
-    bag["payload"] = _trip_payload(depart_date="2026-09-10", return_date="2026-09-01")
+    bag["payload"] = _trip_payload(depart_date="2030-09-10", return_date="2030-09-01")
 
 
 @given("a trip request missing age and fitness level")
@@ -88,12 +88,12 @@ def _response_with_error_code(bag: dict, status: int, code: str) -> None:
 
 @given("an existing trip", target_fixture="trip_id")
 def _existing_trip() -> int:
-    return run_db(lambda session: seed_trip(session, depart_date="2026-09-01"))
+    return run_db(lambda session: seed_trip(session, depart_date="2030-09-01"))
 
 
 @given("an existing trip with no prior flight search", target_fixture="trip_id")
 def _existing_trip_no_search() -> int:
-    return run_db(lambda session: seed_trip(session, depart_date="2026-09-01"))
+    return run_db(lambda session: seed_trip(session, depart_date="2030-09-01"))
 
 
 @given(
@@ -103,7 +103,7 @@ def _existing_trip_no_search() -> int:
 def _round_trip_with_outbound_only_cache() -> int:
     async def _work(session):
         trip_id = await seed_trip(
-            session, depart_date="2026-09-01", return_date="2026-09-08"
+            session, depart_date="2030-09-01", return_date="2030-09-08"
         )
         await seed_flight_search_results(session, trip_id, minutes_ago=1)
         return trip_id
@@ -116,7 +116,7 @@ def _round_trip_with_outbound_only_cache() -> int:
 )
 def _existing_trip_with_itinerary() -> int:
     async def _work(session):
-        trip_id = await seed_trip(session, depart_date="2026-09-01")
+        trip_id = await seed_trip(session, depart_date="2030-09-01")
         await seed_itinerary(session, trip_id)
         return trip_id
 
@@ -129,7 +129,7 @@ def _existing_trip_with_itinerary() -> int:
 )
 def _existing_trip_with_stale_snapshot(bag: dict) -> int:
     async def _work(session):
-        trip_id = await seed_trip(session, depart_date="2026-09-01")
+        trip_id = await seed_trip(session, depart_date="2030-09-01")
         await seed_flight_search_results(session, trip_id, minutes_ago=45)
         latest_flight_ids = await seed_flight_search_results(session, trip_id, minutes_ago=30)
         await seed_itinerary(session, trip_id)
@@ -143,7 +143,7 @@ def _existing_trip_with_stale_snapshot(bag: dict) -> int:
 @given("flights have already been searched live for that route and those dates")
 def _prior_live_search() -> None:
     async def _work(session):
-        other_trip_id = await seed_trip(session, depart_date="2026-09-01")
+        other_trip_id = await seed_trip(session, depart_date="2030-09-01")
         await seed_flight_search_results(session, other_trip_id, minutes_ago=5)
 
     run_db(_work)
@@ -306,8 +306,8 @@ def _provider_returns_unordered_prices(flight_search_spy: FlightSearchSpy) -> No
             carrier=f"carrier-{price}",
             price_usd=price,
             currency="USD",
-            depart_at="2026-09-01T09:00:00",
-            arrive_at="2026-09-01T21:30:00",
+            depart_at="2030-09-01T09:00:00",
+            arrive_at="2030-09-01T21:30:00",
             stops=0,
             booking_token=f"tok-{price}",
             raw_offer={"price": price},
@@ -323,8 +323,8 @@ def _provider_returns_round_trip(flight_search_spy: FlightSearchSpy) -> None:
             carrier="Air France",
             price_usd=772,
             currency="USD",
-            depart_at="2026-09-01T09:00",
-            arrive_at="2026-09-01T21:30",
+            depart_at="2030-09-01T09:00",
+            arrive_at="2030-09-01T21:30",
             stops=0,
             booking_token="resolved-token",
             raw_offer={
@@ -333,12 +333,12 @@ def _provider_returns_round_trip(flight_search_spy: FlightSearchSpy) -> None:
                         "airline": "Air France",
                         "departure_airport": {
                             "id": "JFK",
-                            "date": "2026-09-01",
+                            "date": "2030-09-01",
                             "time": "09:00",
                         },
                         "arrival_airport": {
                             "id": "CDG",
-                            "date": "2026-09-01",
+                            "date": "2030-09-01",
                             "time": "21:30",
                         },
                     }
@@ -349,12 +349,12 @@ def _provider_returns_round_trip(flight_search_spy: FlightSearchSpy) -> None:
                         "airline": "Air France",
                         "departure_airport": {
                             "id": "CDG",
-                            "date": "2026-09-08",
+                            "date": "2030-09-08",
                             "time": "13:00",
                         },
                         "arrival_airport": {
                             "id": "JFK",
-                            "date": "2026-09-08",
+                            "date": "2030-09-08",
                             "time": "15:30",
                         },
                     }
@@ -391,7 +391,7 @@ def _offers_ordered_cheapest_first(bag: dict) -> None:
 @given("an existing trip with cached flights and a generated itinerary", target_fixture="trip_id")
 def _trip_with_cached_flights_and_itinerary() -> int:
     async def _work(session):
-        trip_id = await seed_trip(session, depart_date="2026-09-01")
+        trip_id = await seed_trip(session, depart_date="2030-09-01")
         await seed_flight_search_results(session, trip_id, minutes_ago=1)
         await seed_itinerary(session, trip_id)
         return trip_id

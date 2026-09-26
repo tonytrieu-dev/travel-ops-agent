@@ -58,7 +58,11 @@ export class ApiError extends Error {
   }
 }
 
-async function request<TResponse>(path: string, options?: RequestInit): Promise<TResponse> {
+async function request<TResponse>(
+  path: string,
+  options?: RequestInit,
+  announceAuthenticationRequired = true,
+): Promise<TResponse> {
   const accessToken = getAccessToken()
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...options,
@@ -69,7 +73,7 @@ async function request<TResponse>(path: string, options?: RequestInit): Promise<
     },
   })
 
-  if (response.status === 401) {
+  if (response.status === 401 && announceAuthenticationRequired) {
     clearCredentials()
     window.dispatchEvent(new Event(AUTHENTICATION_REQUIRED_EVENT))
   }
@@ -85,7 +89,7 @@ export async function login(email: string, password: string, device_id: string):
   const result = await request<LoginResult>("/auth/login", {
     method: "POST",
     body: JSON.stringify({ email, password, device_id }),
-  })
+  }, false)
   if (!result.mfa_required) storeCredentials(result)
   return result
 }
@@ -94,7 +98,7 @@ export async function verifyMfa(session_id: string, code: string): Promise<Login
   const result = await request<LoginResult>("/auth/mfa", {
     method: "POST",
     body: JSON.stringify({ session_id, code }),
-  })
+  }, false)
   storeCredentials(result)
   return result
 }

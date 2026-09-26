@@ -377,7 +377,7 @@ class SlackAuthErrorOut(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    email: str
+    email: str = Field(max_length=254)
     device_id: str = Field(min_length=1, max_length=100)
     password: str = Field(min_length=1, max_length=200)
 

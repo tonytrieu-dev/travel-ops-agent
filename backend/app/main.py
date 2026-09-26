@@ -38,12 +38,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title="Travel Agent API", version="0.1.0", lifespan=_lifespan)
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[settings.frontend_origin],
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+
     @app.middleware("http")
     async def correlation_id(request: Request, call_next):
         request.state.correlation_id = request.headers.get("x-correlation-id") or str(uuid4())
@@ -61,6 +56,14 @@ def create_app() -> FastAPI:
                 )
         response.headers["x-correlation-id"] = request.state.correlation_id
         return response
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[settings.frontend_origin],
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["x-correlation-id"],
+    )
     app.include_router(booking.router)
     app.include_router(auth.router)
     app.include_router(connectors.router)

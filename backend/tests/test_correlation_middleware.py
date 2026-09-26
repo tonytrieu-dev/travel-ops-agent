@@ -3,6 +3,7 @@ import logging
 import httpx
 import pytest
 
+from app.config import get_settings
 from app.main import create_app
 
 pytestmark = pytest.mark.no_database
@@ -19,10 +20,16 @@ async def test_unhandled_error_returns_and_logs_the_request_correlation_id(caplo
     with caplog.at_level(logging.ERROR, logger="app.main"):
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.get(
-                "/failure", headers={"x-correlation-id": "failure-correlation"}
+                "/failure",
+                headers={
+                    "origin": get_settings().frontend_origin,
+                    "x-correlation-id": "failure-correlation",
+                },
             )
 
     assert response.status_code == 500
     assert response.headers["x-correlation-id"] == "failure-correlation"
+    assert response.headers["access-control-allow-origin"] == get_settings().frontend_origin
+    assert "x-correlation-id" in response.headers["access-control-expose-headers"]
     assert "sensitive failure detail" not in response.text
     assert "failure-correlation" in caplog.text

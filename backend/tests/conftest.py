@@ -44,7 +44,13 @@ def _truncate_between_tests(request: pytest.FixtureRequest) -> None:
     if request.node.get_closest_marker("no_database") is not None:
         return
     async def _truncate(session: AsyncSession) -> None:
+        await session.execute(
+            text("ALTER TABLE security_event DISABLE TRIGGER security_event_no_truncate")
+        )
         await session.execute(text(f"TRUNCATE {_ALL_TABLES} RESTART IDENTITY CASCADE"))
+        await session.execute(
+            text("ALTER TABLE security_event ENABLE TRIGGER security_event_no_truncate")
+        )
 
     run_db(_truncate)
 
@@ -179,7 +185,9 @@ class PlannerRunSpy:
     )
     calls: int = 0
 
-    async def __call__(self, trip_id: int, prompt: str) -> ItineraryOut | ClarificationOut:
+    async def __call__(
+        self, trip_id: int, prompt: str, trace_id: str | None = None
+    ) -> ItineraryOut | ClarificationOut:
         self.calls += 1
         return self.output
 

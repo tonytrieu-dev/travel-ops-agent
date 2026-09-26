@@ -38,6 +38,7 @@ def test_revoked_session_is_denied_and_denial_threshold_contains_it(client, monk
 def test_missing_and_mfa_unverified_authentication_failures_are_audited(client, monkeypatch) -> None:
     monkeypatch.setenv("ZERO_TRUST_ENFORCED", "true")
     monkeypatch.setenv("ZERO_TRUST_SIGNING_SECRET", "integration-secret")
+    monkeypatch.setenv("AGENT_SERVICE_TOKEN", "integration-service-secret")
     get_settings.cache_clear()
     run_db(lambda session: _seed_user(session, "mfa@tenant-a.test", "tenant-a", "device-a"))
 

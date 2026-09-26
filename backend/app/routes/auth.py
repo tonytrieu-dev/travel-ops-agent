@@ -31,7 +31,7 @@ async def auth_config() -> dict[str, bool]:
 @router.post(
     "/login",
     response_model=TokenOut,
-    responses={429: {"model": ProblemDetail}},
+    responses={401: {"model": ProblemDetail}, 429: {"model": ProblemDetail}},
     dependencies=[Depends(enforce_login_rate_limit)],
 )
 async def login(

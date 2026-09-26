@@ -178,7 +178,7 @@ def _create_trip_payload(**overrides: object) -> dict:
         "origin": "JFK",
         "destination": "Paris",
         "destination_airport": "CDG",
-        "depart_date": "2026-08-01",
+        "depart_date": "2030-08-01",
         "age": 30,
         "fitness_level": "moderate",
     }

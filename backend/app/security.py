@@ -10,7 +10,9 @@ from app.db import get_session, get_session_factory
 from app.config import get_settings
 from app.dependencies import SecurityContext, get_security_context
 from app.models import SecurityEvent, SecurityIncident, SecuritySession, TripRequest, User, HITLBookingLog, utcnow
+from app.repositories.trips_repository import TripError
 from app.request_context import correlation_id
+from app.schemas import ErrorCode
 
 DENIAL_THRESHOLD = 5
 DENIAL_WINDOW_MINUTES = 5
@@ -163,7 +165,7 @@ async def require_owned_trip(
             reason="resource does not exist or is not visible",
             request=request,
         )
-        raise HTTPException(status_code=404, detail=f"No trip {trip_id}.")
+        raise TripError(ErrorCode.TRIP_NOT_FOUND, 404, f"No trip {trip_id}.")
     owner = await session.get(User, trip.user_id)
     if not get_settings().zero_trust_enforced:
         return trip

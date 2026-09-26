@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 from fastapi import Depends, Header, HTTPException, Request
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
@@ -204,7 +205,12 @@ async def get_current_user(
         return user
     user = User(email=DEMO_USER_EMAIL)
     session.add(user)
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        user = await session.scalar(select(User).where(col(User.email) == DEMO_USER_EMAIL))
+        assert user is not None
     return user
 
 
@@ -220,7 +226,7 @@ async def get_security_context(
 
             await record_authentication_failure(reason="missing bearer token", request=request)
             raise HTTPException(status_code=401, detail="zero-trust access token required")
-        user = await get_current_user(request=request, session=session)
+        user = await get_current_user(request=request, authorization=None, session=session)
         assert user.id is not None
         return SecurityContext(user.tenant_id, user.id, user.device_id, user.role, True)
     _, context = await _authenticated_identity(authorization, session, request)

@@ -66,9 +66,9 @@ def upgrade() -> None:
         CREATE TRIGGER security_event_no_truncate
         BEFORE TRUNCATE ON security_event
         FOR EACH STATEMENT EXECUTE FUNCTION reject_security_event_mutation();
-        REVOKE TRUNCATE ON security_event FROM PUBLIC;
         """
     )
+    op.execute("REVOKE TRUNCATE ON security_event FROM PUBLIC")
 
 
 def downgrade() -> None:

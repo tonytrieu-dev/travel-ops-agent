@@ -402,7 +402,15 @@ paths:
     post:
       operationId: login
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/LoginRequest' } } } }
-      responses: { '200': { description: Access token }, '429': { description: Too many login attempts }, '422': { description: Validation error } }
+      responses:
+        '200':
+          description: Access token
+          content: { application/json: { schema: { $ref: '#/components/schemas/TokenOut' } } }
+        '401':
+          description: Invalid credentials
+          content: { application/json: { schema: { $ref: '#/components/schemas/ProblemDetail' } } }
+        '429': { description: Too many login attempts }
+        '422': { description: Validation error }
   /api/auth/mfa:
     post:
       operationId: verify_mfa
@@ -745,7 +753,7 @@ components:
       type: object
       required: [email, device_id, password]
       properties:
-        email: { type: string }
+        email: { type: string, maxLength: 254 }
         device_id: { type: string }
         password: { type: string }
 

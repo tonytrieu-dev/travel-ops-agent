@@ -37,6 +37,24 @@ def test_runtime_implements_every_contracted_route_and_status() -> None:
             )
 
 
+def test_login_contract_declares_token_success_and_invalid_credentials() -> None:
+    contract_responses = _contract()["paths"]["/api/auth/login"]["post"]["responses"]
+    runtime_responses = app.openapi()["paths"]["/api/auth/login"]["post"]["responses"]
+
+    assert contract_responses["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/TokenOut"
+    )
+    assert contract_responses["401"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/ProblemDetail"
+    )
+    assert runtime_responses["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/TokenOut"
+    )
+    assert runtime_responses["401"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/ProblemDetail"
+    )
+
+
 def test_runtime_component_schemas_match_contract_properties() -> None:
     """Beyond paths/statuses, every authored component schema must exist at runtime with the same
     property set — the drift guard that would have caught FlightOfferOut.legs and the agent_run →

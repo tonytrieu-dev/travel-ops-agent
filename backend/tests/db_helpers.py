@@ -6,6 +6,7 @@ share the app's portal event loop (see conftest for why that separation matters)
 
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
+import os
 from typing import Any, TypeVar
 
 from sqlalchemy import func, select
@@ -33,7 +34,9 @@ _DEFAULT_TEST_AGE = 30
 _DEFAULT_TEST_FITNESS_LEVEL = FitnessLevel.MODERATE
 from app.state import BookingState
 
-TEST_DATABASE_URL = "postgresql+asyncpg://tony@localhost:5432/travel_agent_test"
+TEST_DATABASE_URL = os.environ.get(
+    "DATABASE_URL", "postgresql+asyncpg://tony@localhost:5432/travel_agent_test"
+)
 
 _ResultT = TypeVar("_ResultT")
 

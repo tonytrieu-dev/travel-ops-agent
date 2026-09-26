@@ -6,6 +6,7 @@ import {
   getAccessToken,
   listTrips,
   login,
+  verifyMfa,
 } from "./client.ts"
 
 const TOKEN_KEY = "travel-agent.verifiedAccessToken"
@@ -65,4 +66,20 @@ test("a protected 401 clears credentials and announces that sign-in is required"
   await assert.rejects(listTrips())
   assert.equal(getAccessToken(), null)
   assert.equal(authenticationRequired, true)
+})
+
+test("rejected login and MFA do not announce an expired protected session", async () => {
+  let authenticationRequiredCount = 0
+  window.addEventListener(AUTHENTICATION_REQUIRED_EVENT, () => {
+    authenticationRequiredCount += 1
+  })
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ code: "authentication_required", detail: "rejected" }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    })
+
+  await assert.rejects(login("traveler@example.test", "wrong", "device-a"))
+  await assert.rejects(verifyMfa("session-a", "000000"))
+  assert.equal(authenticationRequiredCount, 0)
 })
