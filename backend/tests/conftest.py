@@ -23,12 +23,16 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-TEST_DATABASE_URL = os.environ.get(
-    "TEST_DATABASE_URL", "postgresql+asyncpg://tony@localhost:5432/travel_agent_test"
+def _validate_test_database_url(database_url: str) -> str:
+    database_name = urlparse(database_url).path.rsplit("/", 1)[-1].casefold()
+    if not database_name.endswith(("_test", "_testing")):
+        raise RuntimeError("TEST_DATABASE_URL must end with _test or _testing")
+    return database_url
+
+
+TEST_DATABASE_URL = _validate_test_database_url(
+    os.environ.get("TEST_DATABASE_URL", "postgresql+asyncpg://tony@localhost:5432/travel_agent_test")
 )
-database_name = urlparse(TEST_DATABASE_URL).path.rsplit("/", 1)[-1].casefold()
-if "test" not in database_name:
-    raise RuntimeError("TEST_DATABASE_URL must identify a test database")
 os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 
 from app.adapters.flights_searchapi import FlightSearchOutcome, NormalizedFlightOffer
