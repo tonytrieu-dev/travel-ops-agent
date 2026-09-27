@@ -19,30 +19,47 @@ import os
 from dataclasses import dataclass, field
 
 import pytest
+from sqlalchemy.engine import make_url
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+def _validate_test_database_url(database_url: str) -> str:
+    parsed_url = make_url(database_url)
+    if "database" in parsed_url.query:
+        raise RuntimeError("TEST_DATABASE_URL must not use a database query parameter")
+    database_name = (parsed_url.database or "").casefold()
+    if not database_name.endswith(("_test", "_testing")):
+        raise RuntimeError("TEST_DATABASE_URL must end with _test or _testing")
+    return database_url
+
+
+TEST_DATABASE_URL = _validate_test_database_url(
+    os.environ.get("TEST_DATABASE_URL", "postgresql+asyncpg://tony@localhost:5432/travel_agent_test")
+)
+os.environ["DATABASE_URL"] = TEST_DATABASE_URL
+
 from app.adapters.flights_searchapi import FlightSearchOutcome, NormalizedFlightOffer
 from app.schemas import ClarificationOut, ItineraryDayOut, ItineraryOut
-from tests.db_helpers import TEST_DATABASE_URL, run_db
-
-# Must run before any ``app.*`` import: ``app.db``/``app.config`` build their engine once from
-# ``DATABASE_URL`` at first import, and ``execute_booking_durable`` (DBOS can't take an injected
-# session) reads that same module-level engine directly, bypassing the FastAPI dependency
-# override below entirely — so the test DB has to be correct at the source, not just at the DI
-# seam.
-os.environ.setdefault("DATABASE_URL", TEST_DATABASE_URL)
+from tests.db_helpers import run_db
 
 _ALL_TABLES = (
     "booking_transition, execution_event, agent_run_step, agent_run, hitl_booking_log, "
-    "itinerary, flight_search_result, trip_request, user_account, connector_setting"
+    "itinerary, flight_search_result, trip_request, user_account, connector_setting, security_event, security_session, security_incident"
 )
 
 
 @pytest.fixture(autouse=True)
-def _truncate_between_tests() -> None:
+def _truncate_between_tests(request: pytest.FixtureRequest) -> None:
+    if request.node.get_closest_marker("no_database") is not None:
+        return
     async def _truncate(session: AsyncSession) -> None:
+        await session.execute(
+            text("ALTER TABLE security_event DISABLE TRIGGER security_event_no_truncate")
+        )
         await session.execute(text(f"TRUNCATE {_ALL_TABLES} RESTART IDENTITY CASCADE"))
+        await session.execute(
+            text("ALTER TABLE security_event ENABLE TRIGGER security_event_no_truncate")
+        )
 
     run_db(_truncate)
 
@@ -177,7 +194,9 @@ class PlannerRunSpy:
     )
     calls: int = 0
 
-    async def __call__(self, trip_id: int, prompt: str) -> ItineraryOut | ClarificationOut:
+    async def __call__(
+        self, trip_id: int, prompt: str, trace_id: str | None = None
+    ) -> ItineraryOut | ClarificationOut:
         self.calls += 1
         return self.output
 
