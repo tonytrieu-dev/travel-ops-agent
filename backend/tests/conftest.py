@@ -17,14 +17,17 @@ so app connections (portal loop) and seed connections (seed loop) never cross ev
 import asyncio
 import os
 from dataclasses import dataclass, field
-from urllib.parse import urlparse
 
 import pytest
+from sqlalchemy.engine import make_url
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 def _validate_test_database_url(database_url: str) -> str:
-    database_name = urlparse(database_url).path.rsplit("/", 1)[-1].casefold()
+    parsed_url = make_url(database_url)
+    if "database" in parsed_url.query:
+        raise RuntimeError("TEST_DATABASE_URL must not use a database query parameter")
+    database_name = (parsed_url.database or "").casefold()
     if not database_name.endswith(("_test", "_testing")):
         raise RuntimeError("TEST_DATABASE_URL must end with _test or _testing")
     return database_url
