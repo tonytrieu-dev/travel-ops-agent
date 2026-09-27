@@ -14,7 +14,7 @@ and propose flights, but it has no tool that can approve or execute booking stat
 TravelOps also provides a runnable zero-trust architecture demonstration. Protected API routes
 require a short-lived, server-backed session bound to identity, tenant, role, device, and MFA when
 zero-trust enforcement is enabled. Tenant ownership and reusable policy checks protect resources;
-security events and incidents are append-only.
+security events are append-only and incidents are persisted for review.
 Repeated denials revoke the affected session.
 
 Set `ZERO_TRUST_ENFORCED=true` to require a bearer token on protected API routes. The local issuer is

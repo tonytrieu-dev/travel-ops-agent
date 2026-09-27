@@ -36,8 +36,9 @@ The security control plane implements the course's five required areas:
   boundary rather than assuming internal-network trust.
 - **Continuous monitoring:** each admitted request is persisted as an append-only
   `security_event` with actor, device, segments, action, decision, reason, and correlation ID.
-- **Incident response:** repeated denials create an incident and revoke the affected session;
-  security operators can revoke sessions or disable identities, with the evidence retained.
+- **Incident response:** repeated denials automatically create an incident and revoke the
+  affected session; security operators have read-only event and incident queries over the
+  retained evidence.
 
 This is an application-level and container-friendly demonstration, not a claim that FastAPI
 replaces a production firewall, service mesh, enterprise IdP, or hardware MFA.

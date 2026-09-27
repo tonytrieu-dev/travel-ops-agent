@@ -118,7 +118,6 @@ class SecurityIncident(SQLModel, table=True):
     reason: str
     status: str = Field(default="open", index=True)
     created_at: datetime = Field(default_factory=utcnow)
-    contained_at: datetime | None = None
 
 
 class TripRequest(SQLModel, table=True):

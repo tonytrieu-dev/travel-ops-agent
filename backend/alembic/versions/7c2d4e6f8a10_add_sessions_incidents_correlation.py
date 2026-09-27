@@ -46,7 +46,6 @@ def upgrade() -> None:
         sa.Column("reason", sa.String(), nullable=False),
         sa.Column("status", sa.String(), nullable=False, server_default="open"),
         sa.Column("created_at", sa.DateTime(), nullable=False),
-        sa.Column("contained_at", sa.DateTime()),
     )
     op.create_index("ix_security_incident_tenant_id", "security_incident", ["tenant_id"])
     op.create_index("ix_security_incident_actor_user_id", "security_incident", ["actor_user_id"])

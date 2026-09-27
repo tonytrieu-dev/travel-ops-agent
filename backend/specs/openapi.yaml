@@ -434,7 +434,7 @@ components:
     ErrorCode:
       type: string
       description: Machine-readable failure code; the human explanation is in `detail`.
-      enum: [booking_not_found, trip_not_found, flight_not_found, booking_expired, invalid_transition, validation_error, rate_limit_exceeded, connector_not_configured, forbidden, authentication_required, incident_contained]
+      enum: [booking_not_found, trip_not_found, flight_not_found, booking_expired, invalid_transition, validation_error, rate_limit_exceeded, connector_not_configured, forbidden, authentication_required]
 
     BookingRequestCreate:
       type: object

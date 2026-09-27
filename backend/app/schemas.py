@@ -60,7 +60,6 @@ class ErrorCode(StrEnum):
     CONNECTOR_NOT_CONFIGURED = "connector_not_configured"
     FORBIDDEN = "forbidden"
     AUTHENTICATION_REQUIRED = "authentication_required"
-    INCIDENT_CONTAINED = "incident_contained"
 
 
 def validate_trip_dates(depart_date: str, return_date: str | None) -> None:
@@ -424,7 +423,6 @@ class SecurityIncidentOut(BaseModel):
     reason: str
     status: str
     created_at: UtcDatetime
-    contained_at: UtcDatetime | None
 
 
 class SecurityEventQuery(BaseModel):
