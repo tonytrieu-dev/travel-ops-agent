@@ -14,7 +14,7 @@ and propose flights, but it has no tool that can approve or execute booking stat
 TravelOps also provides a runnable zero-trust architecture demonstration. Protected API routes
 require a short-lived, server-backed session bound to identity, tenant, role, device, and MFA when
 zero-trust enforcement is enabled. Tenant ownership and reusable policy checks protect resources;
-internal agent calls use a separate service token; security events and incidents are append-only.
+security events and incidents are append-only.
 Repeated denials revoke the affected session.
 
 Set `ZERO_TRUST_ENFORCED=true` to require a bearer token on protected API routes. The local issuer is
@@ -49,7 +49,7 @@ service: it does not purchase flights and has not been load-tested or security-a
 ```bash
 docker compose up -d postgres
 cp .env.example .env
-# Set ZERO_TRUST_ENFORCED=true, ZERO_TRUST_SIGNING_SECRET, and AGENT_SERVICE_TOKEN in .env.
+# Set ZERO_TRUST_ENFORCED=true and ZERO_TRUST_SIGNING_SECRET in .env.
 cd backend
 uv run alembic upgrade head
 uv run python -m scripts.seed_security_demo

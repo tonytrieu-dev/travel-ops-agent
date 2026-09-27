@@ -1,21 +1,11 @@
 """Deterministic HTTP walkthrough for the local zero-trust controls."""
 
-import base64
-import hashlib
-import hmac
 import json
 import os
-import time
 
 import httpx
 
-
-def totp(secret: str) -> str:
-    counter = int(time.time()) // 30
-    key = base64.b32decode(secret + "=" * (-len(secret) % 8), casefold=True)
-    digest = hmac.new(key, counter.to_bytes(8, "big"), hashlib.sha1).digest()
-    offset = digest[-1] & 15
-    return f"{(int.from_bytes(digest[offset : offset + 4], 'big') & 0x7FFFFFFF) % 1_000_000:06d}"
+from app.dependencies import _totp_code as totp
 
 
 def login(client: httpx.Client, email: str, device_id: str) -> str:

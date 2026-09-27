@@ -19,7 +19,7 @@ from app.dbos_runtime import launch_dbos, shutdown_dbos
 from app.rate_limit import RateLimitError
 from app.repositories.booking_repository import BookingError
 from app.repositories.trips_repository import TripError
-from app.routes import auth, booking, connectors, security, service, slack, trips
+from app.routes import auth, booking, connectors, security, slack, trips
 from app.request_context import bind_correlation_id
 from app.routes.connectors import ConnectorError
 from app.schemas import ErrorCode, ProblemDetail
@@ -68,7 +68,6 @@ def create_app() -> FastAPI:
     app.include_router(auth.router)
     app.include_router(connectors.router)
     app.include_router(security.router)
-    app.include_router(service.router)
     app.include_router(slack.router)
     app.include_router(trips.router)
 

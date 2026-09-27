@@ -19,8 +19,8 @@ DENIAL_WINDOW_MINUTES = 5
 _ROLE_ACTIONS = {
     "traveler": {"trip.read", "trip.create", "trip.plan", "flight.search", "booking.request", "booking.approve", "booking.execute"},
     "trip-planner": {"trip.read", "trip.create", "trip.plan", "flight.search"},
-    "security-operator": {"security.read", "incident.respond", "connector.configure"},
-    "admin": {"trip.read", "trip.create", "trip.plan", "flight.search", "booking.request", "booking.approve", "booking.execute", "security.read", "incident.respond", "connector.configure"},
+    "security-operator": {"security.read", "connector.configure"},
+    "admin": {"trip.read", "trip.create", "trip.plan", "flight.search", "booking.request", "booking.approve", "booking.execute", "security.read", "connector.configure"},
 }
 
 
@@ -219,8 +219,3 @@ async def enforce_api_segment(
         request=request,
     )
     return context
-
-
-def require_service_token(request: Request, expected_token: str) -> None:
-    if request.headers.get("x-service-token") != expected_token:
-        raise SecurityError("trusted service authentication required", 401)

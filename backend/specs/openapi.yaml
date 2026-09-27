@@ -424,14 +424,6 @@ paths:
     get:
       operationId: list_incidents
       responses: { '200': { description: Tenant-scoped incidents }, '422': { description: Validation error } }
-  /api/security/sessions/{session_id}/revoke:
-    post:
-      operationId: revoke_session
-      responses: { '200': { description: Session revoked }, '422': { description: Validation error } }
-  /internal/agent/heartbeat:
-    post:
-      operationId: agent_heartbeat
-      responses: { '200': { description: Trusted service accepted }, '401': { description: Invalid service token } }
 
 components:
   schemas:

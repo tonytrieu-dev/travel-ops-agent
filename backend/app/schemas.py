@@ -432,7 +432,3 @@ class SecurityEventQuery(BaseModel):
     decision: Literal["allow", "deny"] | None = None
     action: str | None = None
     since: datetime | None = None
-
-
-class ServiceHeartbeatOut(BaseModel):
-    status: Literal["ok"] = "ok"
