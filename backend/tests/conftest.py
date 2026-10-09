@@ -239,6 +239,20 @@ def client(
     monkeypatch.setattr("app.dbos_runtime.get_flight_provider", lambda settings: booking_options_spy)
     monkeypatch.setattr("app.routes.trips.get_flight_provider", lambda settings: flight_search_spy)
     monkeypatch.setattr("app.routes.trips.run_planner_durable", planner_spy)
+    # Zero-trust is enforced by default in production; these legacy route tests predate the auth
+    # boundary and exercise trip/booking/rate-limit behavior with unauthenticated requests, so
+    # this fixture runs them unenforced. The enforced path has its own suite (test_security*.py).
+    from app import config
+
+    unenforced = config.Settings(
+        cerebras_api_key="x",
+        searchapi_api_key="x",
+        tavily_api_key="x",
+        database_url=TEST_DATABASE_URL,
+        zero_trust_enforced=False,
+    )
+    for module in ("app.security", "app.dependencies"):
+        monkeypatch.setattr(f"{module}.get_settings", lambda: unenforced)
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()

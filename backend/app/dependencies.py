@@ -183,6 +183,7 @@ def issue_access_token(security_session: SecuritySession, user: User, secret: st
         "mfa_verified": security_session.mfa_verified,
         "session_id": security_session.session_id,
         "expires_at": int(security_session.expires_at.timestamp()),
+        # Unique per issuance so re-minting from one session never yields an identical string.
         "jti": uuid4().hex,
     }
     encoded = base64.urlsafe_b64encode(

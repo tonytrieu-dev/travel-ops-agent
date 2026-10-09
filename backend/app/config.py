@@ -5,10 +5,11 @@ Every tunable the agent and adapters rely on lives here as a named constant — 
 numbers scattered through the codebase.
 """
 
+import secrets
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import SecretStr, computed_field, model_validator
+from pydantic import Field, SecretStr, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Cerebras runs gpt-oss-120b directly and keeps clean JSON tool-calls for Pydantic AI.
@@ -105,8 +106,16 @@ class Settings(BaseSettings):
 
     use_live_flight_api: bool = True
     frontend_origin: str = "http://localhost:5173"
-    zero_trust_enforced: bool = False
-    zero_trust_signing_secret: SecretStr = SecretStr("local-development-only")
+    # Zero-trust enforcement is the default posture — "never trust, always verify" is not a
+    # toggle. Set ZERO_TRUST_ENFORCED=false only for the legacy trip/booking tests that predate
+    # the auth boundary and exercise route behavior, not identity.
+    zero_trust_enforced: bool = True
+    # No explicit secret -> a fresh per-process key, so an out-of-the-box run is enforced AND
+    # unforgeable (nothing in the repo can sign a valid token). A real deployment sets an explicit
+    # secret so tokens survive a restart and are shared across processes.
+    zero_trust_signing_secret: SecretStr = Field(
+        default_factory=lambda: SecretStr(secrets.token_urlsafe(32))
+    )
 
     slack_bot_token: SecretStr | None = None
     slack_signing_secret: SecretStr | None = None
@@ -119,12 +128,15 @@ class Settings(BaseSettings):
         return self.database_url.replace("postgresql+asyncpg://", "postgresql://")
 
     @model_validator(mode="after")
-    def _require_secure_zero_trust_secret(self) -> "Settings":
-        if self.zero_trust_enforced and self.zero_trust_signing_secret.get_secret_value() == (
-            "local-development-only"
+    def _reject_known_weak_signing_secret(self) -> "Settings":
+        # The generated per-process default is safe; only an explicitly-set known-weak value is
+        # rejected, so a demo credential can never slip into an enforced deployment.
+        if self.zero_trust_enforced and self.zero_trust_signing_secret.get_secret_value() in (
+            "local-development-only",
+            "",
         ):
             raise ValueError(
-                "ZERO_TRUST_SIGNING_SECRET must be set to a non-default value when "
+                "ZERO_TRUST_SIGNING_SECRET must be a strong, non-default value when "
                 "ZERO_TRUST_ENFORCED is enabled"
             )
         return self

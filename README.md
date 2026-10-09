@@ -17,10 +17,13 @@ zero-trust enforcement is enabled. Tenant ownership and reusable policy checks p
 security events are append-only and incidents are persisted for review.
 Repeated denials revoke the affected session.
 
-Set `ZERO_TRUST_ENFORCED=true` to require a bearer token on protected API routes. The local issuer is
-OIDC-shaped for the classroom demo, but intentionally small: it uses an application signing key and
-TOTP rather than pretending to be a production IdP. Production deployment should put Keycloak or
-another OIDC provider in front of the API and use mTLS/service-mesh identity for internal traffic.
+Zero-trust enforcement is **on by default** — every protected API route requires a short-lived
+bearer token, with no toggle to flip first. The local issuer is OIDC-shaped for the classroom
+demo, but intentionally small: it uses an application signing key and TOTP rather than pretending
+to be a production IdP. With no `ZERO_TRUST_SIGNING_SECRET` set, the app generates a fresh
+per-process key, so an out-of-the-box run is both enforced and unforgeable; set an explicit secret
+for a deployment whose tokens must survive a restart. Production should put Keycloak or another
+OIDC provider in front of the API and use mTLS/service-mesh identity for internal traffic.
 
 The SPA signs in through `POST /api/auth/login`, submits the returned session to
 `POST /api/auth/mfa`, stores the resulting 15-minute bearer token in browser storage, and attaches it
@@ -49,7 +52,7 @@ service: it does not purchase flights and has not been load-tested or security-a
 ```bash
 docker compose up -d postgres
 cp .env.example .env
-# Set ZERO_TRUST_ENFORCED=true and ZERO_TRUST_SIGNING_SECRET in .env.
+# Enforcement is already on by default; optionally set ZERO_TRUST_SIGNING_SECRET for stable tokens.
 cd backend
 uv run alembic upgrade head
 uv run python -m scripts.seed_security_demo
@@ -286,9 +289,14 @@ Frontend serves on `http://localhost:5173` (already whitelisted by the backend's
 cd backend
 uv run pytest -q
 uv run pyrefly check
-# Focused zero-trust tests (the integration test needs PostgreSQL)
-uv run pytest -q tests/test_zero_trust.py tests/test_zero_trust_integration.py
+# The suite needs PostgreSQL; the subset that does not is marked and can run without it:
+uv run pytest -q -m no_database
 ```
+
+The zero-trust decision path (identity-claim verification, role/MFA policy, tenant ownership,
+browser segment spoofing, denial-threshold containment) is exercised against a live PostgreSQL
+instance by `tests/test_security.py`; the append-only audit guarantee is enforced by a database
+trigger and checked in `tests/test_append_only.py`.
 
 ### 6. Evals
 
