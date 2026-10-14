@@ -264,6 +264,10 @@ a distributed quota-control mechanism.
 HITL booking is a checkout-link handoff, not a purchase. The optional Slack connector supports one
 workspace and one approval interaction rather than a general chat-platform abstraction.
 
-Not implemented: authentication, multi-user isolation, payment processing, episodic/semantic/
+The security extension adds local password/TOTP authentication, server-backed sessions, and
+application-level tenant/owner checks. Device attestation and network segmentation are not
+implemented; see the trust boundaries in [ARCHITECTURE.md](ARCHITECTURE.md#zero-trust-enterprise-network-overlay).
+
+Not implemented: production identity-provider integration, payment processing, episodic/semantic/
 procedural agent memory, or Saga compensation for a multi-step airline booking. Some code boundaries
 could support those changes, but their implementation effort and behavior have not been validated.

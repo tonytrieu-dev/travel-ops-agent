@@ -15,6 +15,8 @@ def login(client: httpx.Client, email: str, device_id: str) -> str:
     )
     response.raise_for_status()
     body = response.json()
+    if not body["mfa_required"]:
+        return body["access_token"]
     response = client.post(
         "/api/auth/mfa", json={"session_id": body["session_id"], "code": totp("JBSWY3DPEHPK3PXP")}
     )
@@ -39,4 +41,5 @@ with httpx.Client(base_url=os.getenv("TRAVEL_OPS_URL", "http://localhost:8000"))
         "security incidents",
         client.get("/api/security/incidents", headers={"Authorization": f"Bearer {operator}"}),
     )
-    show("forged token", client.get("/api/trips", headers={"Authorization": f"Bearer {traveler[:-1]}0"}))
+    forged = traveler[:-1] + ("0" if traveler[-1] != "0" else "1")
+    show("forged token", client.get("/api/trips", headers={"Authorization": f"Bearer {forged}"}))

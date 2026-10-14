@@ -2,11 +2,11 @@
 
 import asyncio
 import hashlib
-import os
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.config import get_settings
 from app.models import User
 
 
@@ -15,7 +15,7 @@ def password_hash(password: str) -> str:
 
 
 async def main() -> None:
-    engine = create_async_engine(os.environ["DATABASE_URL"])
+    engine = create_async_engine(get_settings().database_url)
     async with async_sessionmaker(engine, expire_on_commit=False)() as session:
         identities = (
             ("traveler@tenant-a.test", "tenant-a", "traveler", "device-a-traveler"),

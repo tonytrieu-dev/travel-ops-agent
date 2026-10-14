@@ -24,7 +24,7 @@ flowchart LR
 ## Zero-trust enterprise-network overlay
 
 The application is a small, container-friendly zero-trust API-boundary demonstration. A request
-carries a short-lived signed identity bound to a server-side session and device; the API checks
+carries a short-lived signed identity bound to a server-side session and device identifier; the API checks
 tenant, role, MFA, revocation, and resource ownership before admitting it from the web boundary.
 
 The security control plane implements the course's five required areas:
@@ -40,8 +40,16 @@ The security control plane implements the course's five required areas:
   affected session; security operators have read-only event and incident queries over the
   retained evidence.
 
-This is an application-level and container-friendly demonstration, not a claim that FastAPI
-replaces a production firewall, service mesh, enterprise IdP, or hardware MFA.
+The submitted device identifier is checked against the user, token, and session records. That
+establishes identity consistency; it does not prove device possession, health, or attestation.
+The segment dependency assigns a web/API label and rejects caller-supplied internal-service
+headers. It enforces an application boundary; no network firewall, workload identity, or mTLS
+boundary is implemented. A bearer-token holder can replay the token from another device.
+
+[NIST SP 800-207](https://csrc.nist.gov/pubs/sp/800/207/final) treats authentication and
+authorization as explicit decisions and does not grant trust merely from network location or
+asset ownership. This demo illustrates selected application controls; production device and
+network controls, an enterprise IdP, and independent security assessment remain outside its scope.
 
 The backend is a single FastAPI process. The frontend is a separate static SPA that talks to it
 over REST; there is no server-rendered coupling between them.

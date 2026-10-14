@@ -22,6 +22,7 @@ import pytest
 from sqlalchemy.engine import make_url
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 def _validate_test_database_url(database_url: str) -> str:
     parsed_url = make_url(database_url)
@@ -225,11 +226,14 @@ def client(
 ):
     from starlette.testclient import TestClient
 
-    from app.db import get_engine, get_session
+    from app.db import get_session
     from app.main import app
 
-    app_engine = create_async_engine(TEST_DATABASE_URL, pool_pre_ping=True)
+    # DBOS tests use both the portal and pytest loops; pooled connections cannot cross them.
+    app_engine = create_async_engine(TEST_DATABASE_URL, poolclass=NullPool)
     app_session_factory = async_sessionmaker(app_engine, expire_on_commit=False)
+    monkeypatch.setattr("app.db._engine", app_engine)
+    monkeypatch.setattr("app.db._session_factory", app_session_factory)
 
     async def _override_get_session():
         async with app_session_factory() as session:
@@ -257,8 +261,3 @@ def client(
         yield test_client
     app.dependency_overrides.clear()
     asyncio.run(app_engine.dispose())
-    # execute_booking_durable can't take a Depends-injected session (DBOS args must be
-    # serializable), so it opens one from app.db's own module-level engine directly — that
-    # engine's pooled connections would otherwise outlive this test's TestClient portal loop and
-    # get reused on the next test's (different) loop, which asyncpg rejects outright.
-    asyncio.run(get_engine().dispose())

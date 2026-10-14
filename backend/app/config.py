@@ -80,8 +80,7 @@ FLIGHT_CACHE_TTL_MINUTES = 15
 LLM_INPUT_PRICE_PER_MILLION_TOKENS = 0.59
 LLM_OUTPUT_PRICE_PER_MILLION_TOKENS = 0.79
 
-# No auth yet: every request acts as this one fixed user. get_current_user() is the single seam
-# that will start resolving a real identity later — route handlers never read this directly.
+# The identity fallback is used only when security enforcement is disabled for development.
 DEMO_USER_EMAIL = "tonytrieu.dev@gmail.com"
 
 # Cap concurrent agent runs so a burst can't blow through the LLM provider's rate limits.

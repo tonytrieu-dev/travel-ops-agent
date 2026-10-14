@@ -14,7 +14,6 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
-from app import config
 from app.config import Settings
 from app.dependencies import (
     SecurityContext,
@@ -51,7 +50,6 @@ def _patch_settings(monkeypatch: pytest.MonkeyPatch, settings: Settings) -> Iter
     for module in ("app.config", "app.security", "app.dependencies"):
         monkeypatch.setattr(f"{module}.get_settings", lambda: settings)
     yield settings
-    config.get_settings.cache_clear()
 
 
 @pytest.fixture

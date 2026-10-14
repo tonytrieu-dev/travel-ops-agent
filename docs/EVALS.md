@@ -161,15 +161,17 @@ starts still need environment-specific testing.
 **Security controls and gaps.** Configuration secrets use Pydantic `SecretStr`; the agent's tools
 cannot change booking state; booking and execution audit rows are protected by append-only database
 triggers; and Slack callbacks are signature-checked. Web-search content is delimited as untrusted
-input and the sanitizer has unit coverage. These are narrow controls, not a security assessment.
-There is no application authentication or per-visitor data isolation, the rate limiter is not a
-durable abuse-prevention mechanism, and adversarial web content has not been exercised through an
-end-to-end eval. An unrestricted public deployment would need those gaps addressed first.
+input. These are narrow controls, not a security assessment.
+The security extension adds local password/TOTP authentication, revocable sessions, role policy,
+and tenant/owner checks; see [security validation and trust boundaries](SECURITY_EVALUATION.md).
+Device attestation and network segmentation remain absent, the rate limiter is not a durable
+abuse-prevention mechanism, and adversarial web content has not been exercised through an
+end-to-end eval. Public deployment needs a separate security assessment.
 
 **Integrations.** Provider implementations are separated behind dependency injection and strategy
 interfaces, and connector enablement is stored in the database. The execution panel reads persisted
 run events. These choices make the current integrations easier to inspect and replace, but the
-project does not implement organizational requirements such as SSO, role-based access control,
+project does not implement organizational requirements such as enterprise SSO, centralized role governance,
 centralized telemetry, retention policy, or compliance reporting.
 
 **Why there is no vector database.** Activity data comes from live web search rather than a local

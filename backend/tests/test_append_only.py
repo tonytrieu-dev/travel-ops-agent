@@ -105,3 +105,12 @@ def test_audit_rows_are_append_only(
     assert surviving == original, (
         f"{table}.{column} was mutated despite the append-only trigger (got {surviving!r})"
     )
+
+
+def test_security_events_cannot_be_truncated() -> None:
+    row_id = run_db(_seed_security_event)
+    with pytest.raises(DBAPIError, match="(?i)append-only"):
+        run_db(lambda session: session.execute(text("TRUNCATE security_event")))
+    assert run_db(lambda session: session.scalar(
+        text("SELECT id FROM security_event WHERE id = :row_id"), {"row_id": row_id}
+    )) == row_id

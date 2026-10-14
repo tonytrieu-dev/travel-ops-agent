@@ -404,7 +404,10 @@ paths:
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/LoginRequest' } } } }
       responses:
         '200':
-          description: Access token
+          description: >-
+            Access token. MFA-enabled users must complete /api/auth/mfa before protected
+            requests. With MFA disabled, the token permits ordinary requests but does not
+            satisfy the verified-MFA requirement for booking approval or execution.
           content: { application/json: { schema: { $ref: '#/components/schemas/TokenOut' } } }
         '401':
           description: Invalid credentials

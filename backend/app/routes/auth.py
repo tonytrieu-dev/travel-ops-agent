@@ -1,4 +1,4 @@
-"""Local OIDC-compatible classroom issuer with server-backed sessions and TOTP MFA."""
+"""Local classroom token issuer with server-backed sessions and TOTP MFA."""
 
 from datetime import UTC
 

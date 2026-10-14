@@ -12,16 +12,15 @@ and propose flights, but it has no tool that can approve or execute booking stat
 ## Zero-trust enterprise network extension
 
 TravelOps also provides a runnable zero-trust architecture demonstration. Protected API routes
-require a short-lived, server-backed session bound to identity, tenant, role, device, and MFA when
+require a short-lived, server-backed session bound to identity, tenant, role, a device identifier, and MFA when
 zero-trust enforcement is enabled. Tenant ownership and reusable policy checks protect resources;
 security events are append-only and incidents are persisted for review.
 Repeated denials revoke the affected session.
 
 Zero-trust enforcement is **on by default** — every protected API route requires a short-lived
-bearer token, with no toggle to flip first. The local issuer is OIDC-shaped for the classroom
-demo, but intentionally small: it uses an application signing key and TOTP rather than pretending
-to be a production IdP. With no `ZERO_TRUST_SIGNING_SECRET` set, the app generates a fresh
-per-process key, so an out-of-the-box run is both enforced and unforgeable; set an explicit secret
+bearer token, with no toggle to flip first. The classroom issuer uses custom HMAC-signed tokens,
+passwords, and TOTP; it does not implement OIDC discovery or standard OIDC token validation.
+With no `ZERO_TRUST_SIGNING_SECRET` set, the app generates a fresh per-process signing key; set an explicit secret
 for a deployment whose tokens must survive a restart. Production should put Keycloak or another
 OIDC provider in front of the API and use mTLS/service-mesh identity for internal traffic.
 
@@ -32,6 +31,10 @@ local user; MFA-enabled users must complete the TOTP step. Connector settings ar
 not tenant-owned, and both reading and changing them require the `security-operator` or `admin` role
 plus verified MFA.
 
+Device IDs demonstrate consistency between submitted and stored identity attributes; they do not
+prove device possession or health. Segment checks enforce an application boundary, without
+network segmentation or workload authentication. See the [trust boundaries](docs/ARCHITECTURE.md#zero-trust-enterprise-network-overlay).
+
 ## Start here
 
 - [Architecture](#architecture) — the system boundary and critical request path.
@@ -40,12 +43,13 @@ plus verified MFA.
 - [Zero-trust demo](#zero-trust-demo) — deterministic identities, MFA, attacks, containment, and
   security-operations queries.
 - [Engineering decisions](docs/DECISIONS.md) — deeper rationale and trade-offs.
-- [Security evaluation](docs/SECURITY_EVALUATION.md) — actual focused-test results and pending
-  PostgreSQL scenarios.
+- [Security evaluation](docs/SECURITY_EVALUATION.md) — PostgreSQL validation, repeatable scenarios,
+  and a modest local latency comparison.
 
 There is no public hosted demo yet. Run the local stack below, or use the walkthrough as a short
 recorded demo script. The project intentionally does not present itself as a production travel
-service: it does not purchase flights and has not been load-tested or security-audited.
+service: it does not purchase flights and has not had production-scale load testing or an
+independent security audit.
 
 ## Zero-trust demo
 
@@ -56,14 +60,19 @@ cp .env.example .env
 cd backend
 uv run alembic upgrade head
 uv run python -m scripts.seed_security_demo
-uv run python scripts/security_demo.py
+uv run python -m scripts.security_demo
 ```
 
 The synthetic accounts all use `demo-password` and the TOTP secret
 `JBSWY3DPEHPK3PXP` (the script calculates the current six-digit code). The demo shows a valid
-tenant-scoped request, MFA-gated operator access, token/session rejection, cross-tenant denial,
-browser segment spoof rejection, five denials triggering session revocation, and the
+tenant-scoped request, MFA-gated operator access, token/session rejection,
+browser segment spoof rejection, denials triggering session revocation, and the
 security-operations event/incident query. These are classroom credentials; never reuse them.
+
+For the repeatable PostgreSQL demonstration, including authorized booking, cross-tenant denial,
+tampered tokens, revocation, and preserved workflow/audit behavior after provider failure, follow
+the [evaluation commands](docs/SECURITY_EVALUATION.md). That harness uses isolated test data and
+stubbed external providers; it does not purchase flights or consume model/search quota.
 
 ## Three-minute walkthrough
 
@@ -189,9 +198,9 @@ The detailed implementation notes remain in [ARCHITECTURE.md](docs/ARCHITECTURE.
 ## Project status and limitations
 
 This is a portfolio and reference implementation intended for local development and evaluation.
-It is not a production travel service and has not been load tested or security audited. There is
-no authentication: every request currently uses the same demo account, so the application must
-not be exposed as an unrestricted public service. Activity citations show that a URL came from the
+It is not a production travel service; testing includes only modest local load, with no independent
+security audit. The local password/TOTP issuer and tenant/owner checks are bounded demonstration
+controls, not a production identity or device-management system. Activity citations show that a URL came from the
 configured search provider; they do not independently verify every generated claim. The booking
 flow returns third-party checkout links and does not reserve, purchase, or hold a fare.
 
