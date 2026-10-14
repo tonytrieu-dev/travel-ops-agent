@@ -55,6 +55,26 @@ def test_login_contract_declares_token_success_and_invalid_credentials() -> None
     )
 
 
+def test_contract_references_resolve() -> None:
+    contract = _contract()
+    pending = [contract]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, list):
+            pending.extend(value)
+            continue
+        if not isinstance(value, dict):
+            continue
+        reference = value.get("$ref")
+        if reference and reference.startswith("#/"):
+            target = contract
+            for part in reference[2:].split("/"):
+                key = part.replace("~1", "/").replace("~0", "~")
+                assert key in target, f"Unresolved contract reference: {reference}"
+                target = target[key]
+        pending.extend(value.values())
+
+
 def test_runtime_component_schemas_match_contract_properties() -> None:
     """Beyond paths/statuses, every authored component schema must exist at runtime with the same
     property set — the drift guard that would have caught FlightOfferOut.legs and the agent_run →

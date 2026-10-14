@@ -383,7 +383,7 @@ class LoginRequest(BaseModel):
 
 class MfaVerifyRequest(BaseModel):
     session_id: str = Field(min_length=1)
-    code: str = Field(pattern=r"^\d{6}$")
+    code: str = Field(pattern=r"^[0-9]{6}$")
 
 
 class TokenOut(BaseModel):

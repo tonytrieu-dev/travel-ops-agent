@@ -38,8 +38,10 @@ class ConnectorError(Exception):
 
 
 def slack_configured(settings: Settings) -> bool:
+    # shortcut: Slack users are unmapped; add owner/role/MFA checks before enabling enforced approvals.
     return bool(
-        settings.slack_bot_token
+        not settings.zero_trust_enforced
+        and settings.slack_bot_token
         and settings.slack_signing_secret
         and settings.slack_approvals_channel_id
     )
@@ -73,8 +75,9 @@ async def get_connectors(
     await authorize(context, session, action="connector.configure", resource="connectors", request=request, require_mfa=True)
     settings = get_settings()
     row = await _get_or_create_row(session)
+    configured = slack_configured(settings)
     return ConnectorsOut(
-        slack=ConnectorStatusOut(configured=slack_configured(settings), enabled=row.slack_enabled)
+        slack=ConnectorStatusOut(configured=configured, enabled=configured and row.slack_enabled)
     )
 
 
@@ -91,13 +94,13 @@ async def set_slack_connector(
         raise ConnectorError(
             ErrorCode.CONNECTOR_NOT_CONFIGURED,
             409,
-            "Slack is not configured on this deployment (missing bot token, signing secret, "
-            "or channel id).",
+            "Slack approvals require configured credentials and development mode.",
         )
     row = await _get_or_create_row(session)
     row.slack_enabled = body.enabled
     session.add(row)
     await session.commit()
+    configured = slack_configured(settings)
     return ConnectorsOut(
-        slack=ConnectorStatusOut(configured=slack_configured(settings), enabled=row.slack_enabled)
+        slack=ConnectorStatusOut(configured=configured, enabled=configured and row.slack_enabled)
     )

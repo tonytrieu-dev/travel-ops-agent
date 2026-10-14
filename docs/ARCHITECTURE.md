@@ -40,6 +40,10 @@ The security control plane implements the course's five required areas:
   affected session; security operators have read-only event and incident queries over the
   retained evidence.
 
+The legacy Slack approval connector is disabled under enforcement. Its shared availability
+check prevents callbacks, notifications, and enabling the toggle until Slack users can be mapped
+to application identities and checked for ownership, role, and MFA.
+
 The submitted device identifier is checked against the user, token, and session records. That
 establishes identity consistency; it does not prove device possession, health, or attestation.
 The segment dependency assigns a web/API label and rejects caller-supplied internal-service

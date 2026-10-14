@@ -31,6 +31,10 @@ local user; MFA-enabled users must complete the TOTP step. Connector settings ar
 not tenant-owned, and both reading and changing them require the `security-operator` or `admin` role
 plus verified MFA.
 
+Slack approval callbacks and notifications are disabled while enforcement is enabled, even
+with credentials configured. Slack users are not mapped to trip owners or verified application
+sessions; approve and cancel bookings in the app. The legacy Slack flow is development-only.
+
 Device IDs demonstrate consistency between submitted and stored identity attributes; they do not
 prove device possession or health. Segment checks enforce an application boundary, without
 network segmentation or workload authentication. See the [trust boundaries](docs/ARCHITECTURE.md#zero-trust-enterprise-network-overlay).

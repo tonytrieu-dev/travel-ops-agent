@@ -361,7 +361,9 @@ paths:
             The interaction was processed. The original Slack message is updated through
             chat.update and this response is an empty acknowledgment.
         '401':
-          description: Missing/invalid Slack signature, or Slack is not configured.
+          description: >-
+            Missing/invalid Slack signature, missing configuration, or security enforcement
+            is enabled. Slack users are not mapped to authorized trip owners.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/SlackAuthErrorOut' }
@@ -380,7 +382,7 @@ paths:
   /api/connectors/slack:
     patch:
       operationId: set_slack_connector
-      summary: Enable or disable the Slack connector. 409 if Slack env vars aren't configured.
+      summary: Enable or disable Slack. Enabling requires credentials and development mode.
       requestBody:
         required: true
         content:
@@ -393,7 +395,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ConnectorsOut' }
         '409':
-          description: Slack is not configured on this deployment (missing env vars).
+          description: Slack credentials are missing or security enforcement is enabled.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -729,8 +731,8 @@ components:
       type: object
       required: [configured, enabled]
       properties:
-        configured: { type: boolean }
-        enabled: { type: boolean }
+        configured: { type: boolean, description: Credentials present and security enforcement disabled. }
+        enabled: { type: boolean, description: Configured and notifications enabled. }
 
     ConnectorsOut:
       type: object
@@ -757,4 +759,14 @@ components:
       required: [session_id, code]
       properties:
         session_id: { type: string }
-        code: { type: string }
+        code: { type: string, pattern: '^[0-9]{6}$' }
+
+    TokenOut:
+      type: object
+      required: [access_token, expires_at, session_id, mfa_required]
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, enum: [Bearer], default: Bearer }
+        expires_at: { type: string, format: date-time }
+        session_id: { type: string }
+        mfa_required: { type: boolean }

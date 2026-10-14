@@ -18,3 +18,14 @@ Feature: Server-backed identity and booking authorization
     When one traveler attempts to read the other tenant's trip five times
     Then each attempt is forbidden and the attacking session is revoked
     And the owning traveler can still read the trip
+
+  Scenario: Slack approval cannot bypass enforced booking authorization
+    Given security enforcement is enabled and Slack credentials are configured
+    And a pending booking owned by a traveler without verified MFA
+    When an unmapped Slack user submits a correctly signed approval callback
+    Then the callback is rejected and the booking remains pending without an audit transition
+
+  Scenario: Non-ASCII MFA digits are rejected at intake
+    Given a pending MFA session
+    When the traveler submits six non-ASCII digits
+    Then the request fails validation before MFA verification

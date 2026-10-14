@@ -37,7 +37,10 @@ def enforced_client(client, monkeypatch: pytest.MonkeyPatch):
         zero_trust_enforced=True,
         zero_trust_signing_secret=_SIGNING_SECRET,
     )
-    for module in ("app.config", "app.security", "app.dependencies", "app.routes.auth"):
+    for module in (
+        "app.config", "app.security", "app.dependencies", "app.routes.auth",
+        "app.routes.slack", "app.routes.connectors", "app.routes.booking",
+    ):
         monkeypatch.setattr(f"{module}.get_settings", lambda: settings)
     yield client
 
@@ -242,6 +245,77 @@ def test_pending_mfa_token_cannot_reach_protected_routes(enforced_client) -> Non
     assert response.json()["mfa_required"] is True
     headers = {"Authorization": f"Bearer {response.json()['access_token']}"}
     assert enforced_client.get("/api/trips", headers=headers).status_code == 403
+
+
+@pytest.mark.parametrize("enforced", [True, False])
+def test_signed_slack_approval_requires_development_mode(
+    enforced_client, monkeypatch, enforced: bool
+) -> None:
+    import json
+    import time
+    from unittest.mock import AsyncMock
+    from urllib.parse import urlencode
+
+    from pydantic import SecretStr
+    from sqlalchemy import func, select
+    from sqlmodel import col
+
+    from app.adapters.slack_hitl import _compute_slack_signature
+    from app.dependencies import get_settings
+    from app.models import BookingTransition
+    from tests.db_helpers import get_booking
+
+    settings = get_settings()
+    settings.zero_trust_enforced = enforced
+    settings.slack_bot_token = SecretStr("test-bot")
+    settings.slack_signing_secret = SecretStr("test-slack-secret")
+    settings.slack_approvals_channel_id = "test-channel"
+    update_message = AsyncMock(return_value=True)
+    monkeypatch.setattr("app.routes.slack.update_approval_message", update_message)
+    user_id = _seed_user("owner@tenant-a.test", "tenant-a", "traveler", "device-a", mfa_enabled=False)
+    booking_id = _owned_booking(user_id)
+    payload = {
+        "type": "block_actions",
+        "channel": {"id": "test-channel"},
+        "user": {"id": "unmapped-slack-user"},
+        "actions": [{"action_id": "approve_booking", "value": str(booking_id)}],
+    }
+    body = urlencode({"payload": json.dumps(payload)}).encode()
+    timestamp = str(int(time.time()))
+    response = enforced_client.post("/api/slack/interactions", content=body, headers={
+        "Content-Type": "application/x-www-form-urlencoded",
+        "X-Slack-Request-Timestamp": timestamp,
+        "X-Slack-Signature": _compute_slack_signature(body, timestamp, "test-slack-secret"),
+    })
+
+    assert response.status_code == (401 if enforced else 200), response.text
+    expected_state = BookingState.PENDING_USER_CONFIRMATION if enforced else BookingState.CONFIRMED
+    assert run_db(lambda session: get_booking(session, booking_id)).state == expected_state
+    assert run_db(lambda session: session.scalar(
+        select(func.count(col(BookingTransition.id))).where(col(BookingTransition.booking_log_id) == booking_id)
+    )) == (0 if enforced else 1)
+    assert update_message.await_count == (0 if enforced else 1)
+
+
+def test_non_ascii_mfa_digits_are_rejected_before_verification(enforced_client, monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    from app.dependencies import verify_session_mfa
+
+    _seed_user("traveler@tenant-a.test", "tenant-a", "traveler", "device-a")
+    login = enforced_client.post("/api/auth/login", json={
+        "email": "traveler@tenant-a.test", "password": "demo-password", "device_id": "device-a",
+    })
+    assert login.status_code == 200, login.text
+    verify = AsyncMock(wraps=verify_session_mfa)
+    monkeypatch.setattr("app.routes.auth.verify_session_mfa", verify)
+    response = enforced_client.post("/api/auth/mfa", json={
+        "session_id": login.json()["session_id"], "code": "１２３４５６",
+    })
+
+    assert response.status_code == 422, response.text
+    assert response.json()["code"] == "validation_error"
+    verify.assert_not_awaited()
 
 
 @pytest.mark.skipif(os.getenv("RUN_SECURITY_LOAD") != "1", reason="explicit latency benchmark")

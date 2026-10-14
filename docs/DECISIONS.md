@@ -211,6 +211,10 @@ local development. `ngrok http 8000` is the tunnel used for this (see `docs/SLAC
 no code depends on ngrok specifically, any HTTPS tunnel pointed at port 8000 works the same way.
 
 ## Slack approve only confirms; execute stays in the frontend
+This legacy flow is development-only. Security enforcement disables Slack callbacks and
+notifications because a workspace signature does not authorize the clicking user to mutate
+another traveler's booking. Approvals use the app's ownership, role, and MFA checks instead.
+
 The Slack callback (`routes/slack.py`) calls only `confirm_booking`/`reject_booking`, never
 `execute_booking`. **Alternative:** let Approve in Slack also execute the booking.
 **Rejected** — Slack requires an ack within 3 seconds, and execute calls SearchApi and can take up
