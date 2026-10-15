@@ -17,8 +17,8 @@ flowchart LR
     DBOS -.->|execute_booking_durable wraps| Repo
     DBOS --> DB
     API -->|/api/connectors| ConnSetting[(connector_setting)]
-    API -->|notify_pending_approval| Slack[(Slack)]
-    Slack -->|/api/slack/interactions| API
+    API -->|development only; enforcement off| Slack[(Legacy Slack)]
+    Slack -->|signed callback; enforcement off| API
 ```
 
 ## Zero-trust enterprise-network overlay
@@ -126,9 +126,9 @@ tool-calling loop, and separate browser interface. See "Why this stack, as a who
 - **Visible UI:** React SPA with a live tool-call feed and an execution panel (see below).
 - **HITL booking:** explicit confirm-then-execute clicks gate the booking handoff;
   see "HITL booking" below for what "execute" does and doesn't do.
-- **Slack HITL connector:** an optional, DB-toggled Slack approval message with
-  Confirm/Reject buttons offers the same gate through Slack instead of the UI; see "Slack HITL
-  connector" below.
+- **Legacy Slack HITL connector:** with enforcement disabled for local development, an optional,
+  DB-toggled Slack message offers the same state-machine transition through Confirm/Reject
+  buttons; see "Slack HITL connector" below.
 
 ## Architectural patterns
 
@@ -172,7 +172,7 @@ search behavior shared by the route and planner tool.
 | Cerebras (`gpt-oss-120b`) | The planner LLM — reasoning, tool selection, structured output. | Pydantic AI `CerebrasModel`/`CerebrasProvider` in `planner.py`. |
 | SearchApi.io Google Flights | Flight offers and booking-option links in live mode. | `flights_searchapi.py` (Live vs Recorded strategy). |
 | Tavily | Activity-search results with source URLs. | `activities_tavily.py`. |
-| Slack (optional) | Approval message with Confirm/Reject buttons; signed callback. | `slack_hitl.py` + `routes/slack.py`. |
+| Slack (development only) | Legacy approval message and signed callback, unavailable under enforcement. | `slack_hitl.py` + `routes/slack.py`. |
 
 **AI protocols:**
 
@@ -246,7 +246,7 @@ user-scoped) backs the sibling "Your trips" tab, filtered client-side by a date-
 
 Five core tables (`user_account`, `trip_request`, `flight_search_result`, `itinerary`,
 `hitl_booking_log`), one connector-config table (`connector_setting` — a single-row, DB-backed
-toggle so the Slack connector can be flipped at runtime without a restart), and four
+toggle for the legacy development-only Slack connector), and four
 audit/observability tables (`booking_transition`, `execution_event`, `agent_run`, `agent_run_step`)
 in `app/models.py`. `booking_transition` and `execution_event` are append-only, enforced by a
 Postgres trigger (`reject_audit_row_mutation()`) — `UPDATE`/`DELETE` raises at the database level
@@ -274,22 +274,22 @@ for this project; see [DECISIONS.md](DECISIONS.md).
 
 ## Slack HITL connector (`app/adapters/slack_hitl.py`, `app/routes/slack.py`, `app/routes/connectors.py`)
 
-Optional, off by default. `GET /api/connectors` reads and `PATCH /api/connectors/slack` flips the
-single-row `connector_setting.slack_enabled` toggle, gated so it can only be enabled when
-`SLACK_BOT_TOKEN`/`SLACK_SIGNING_SECRET`/`SLACK_APPROVALS_CHANNEL_ID` are all configured (409
-otherwise). Connector settings are deployment-wide rather than tenant-owned; both endpoints require
-the `security-operator` or `admin` role and verified MFA. The frontend's Connectors tab
-(`ConnectorsPanel.tsx`) drives this toggle.
+Legacy development path, off by default and unavailable whenever `ZERO_TRUST_ENFORCED=true`.
+With enforcement disabled, `GET /api/connectors` reads and `PATCH /api/connectors/slack` flips the
+single-row `connector_setting.slack_enabled` toggle. Enabling it also requires
+`SLACK_BOT_TOKEN`/`SLACK_SIGNING_SECRET`/`SLACK_APPROVALS_CHANNEL_ID` (409 otherwise). Connector
+settings are deployment-wide rather than tenant-owned. Under enforcement, both endpoints still
+require the `security-operator` or `admin` role and verified MFA, but the connector remains
+unavailable. The frontend's Connectors tab (`ConnectorsPanel.tsx`) drives this toggle.
 
-When enabled, `request_booking` (`routes/booking.py`) additionally posts a Confirm/Reject Block
-Kit message via `notify_pending_approval`; Slack's callback hits `POST /api/slack/interactions`,
-which verifies the request signature (stdlib `hmac`, constant-time compare) before resolving to
-the same `confirm_booking`/`reject_booking` repository calls the in-app buttons use — Slack is an
-alternate front door to the identical state machine, not a second one. Slack's Interactivity
-config requires a public HTTPS URL for that callback, so local development tunnels the backend
-with `ngrok http 8000`. See [SLACK_SETUP.md](SLACK_SETUP.md) for setup and
-[DECISIONS.md](DECISIONS.md) for why this is a hand-rolled adapter instead of a third-party chat
-SDK.
+In development mode, an enabled connector makes `request_booking` (`routes/booking.py`) post a
+Confirm/Reject Block Kit message via `notify_pending_approval`. Slack's callback hits
+`POST /api/slack/interactions`, verifies the request signature (stdlib `hmac`, constant-time
+compare), then resolves to the same `confirm_booking`/`reject_booking` repository calls as the
+in-app buttons. Under enforcement, the shared availability check rejects the callback and prevents
+notifications and enablement because Slack users are not mapped to application sessions, owners,
+roles, or MFA. See [SLACK_SETUP.md](SLACK_SETUP.md) for local setup and
+[DECISIONS.md](DECISIONS.md) for the adapter decision.
 
 ## Agent Execution Panel
 

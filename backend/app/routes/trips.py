@@ -235,11 +235,16 @@ async def get_trip_execution(
     return _to_panel_out(trip_id, runs_with_details, events)
 
 
-@router.get("/execution", response_model=GlobalExecutionPanelOut)
+@router.get(
+    "/execution", response_model=GlobalExecutionPanelOut, responses={403: {"model": ProblemDetail}}
+)
 async def get_all_execution(
+    request: Request,
     session: AsyncSession = Depends(get_session),
     user: User = Depends(get_current_user),
+    context: SecurityContext = Depends(get_security_context),
 ) -> GlobalExecutionPanelOut:
+    await authorize(context, session, action="trip.read", resource="execution", request=request)
     assert user.id is not None, "get_current_user must always return a persisted user"
     runs_with_details = await repository.list_execution_runs_for_user(session, user.id)
     return GlobalExecutionPanelOut(

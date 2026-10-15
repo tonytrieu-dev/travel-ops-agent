@@ -6,7 +6,7 @@ model providers are test doubles. No live booking or paid provider calls are par
 
 The default suite runs focused regressions; the latency benchmark is opt-in.
 
-The focused backend suite passed: **49 tests passed, 1 benchmark skipped**. The type checker
+The focused backend suite passed: **50 tests passed, 1 benchmark skipped**. The type checker
 reported **0 errors**.
 
 | Scenario | Observed behavior | Evidence |
@@ -15,6 +15,7 @@ reported **0 errors**.
 | MFA-enabled login | Pending token rejected; verified token reaches owned resources | `test_pending_mfa_token_cannot_reach_protected_routes`, `test_full_login_mfa_token_round_trip_reaches_an_owned_resource` |
 | Tampered or expired token | HTTP 401 | Separate signature and expiry regressions in `test_security.py` |
 | Role/MFA escalation | Denied by policy | `test_security.py::test_privileged_action_needs_mfa_and_the_right_role` |
+| Global execution role boundary | Security operator receives 403 and a persisted `trip.read` denial | `test_global_execution_history_applies_trip_read_role_policy` |
 | Cross-tenant access and containment | Five 403 responses, one incident, then 401 for the revoked session; owner still gets 200 | `test_cross_tenant_denials_revoke_only_the_attacking_session` |
 | Browser internal-segment spoof | HTTP 403 and persisted denial event | `test_segment_spoof_header_is_rejected_as_403_through_the_handler`, security policy tests |
 | Append-only enforcement | UPDATE/DELETE rejected for booking transitions, execution events, and security events; security-event TRUNCATE rejected | `test_append_only.py` |
@@ -33,7 +34,8 @@ token received 403 on `/api/trips`. New sessions now start with `mfa_verified=Fa
 successful TOTP check changes it to true. Disabling MFA permits ordinary password-authenticated
 access and does not satisfy privileged-action MFA requirements.
 
-The merge-review regressions were run before implementation: the contract check named the
+The merge-review regressions were run before implementation: the global execution route returned
+200 to a role without `trip.read`, the contract check named the
 missing `TokenOut` schema, a correctly signed Slack approval succeeded under enforcement, and
 non-ASCII MFA digits reached the verifier and returned 500. Each check now passes at its named
 boundary. Slack callbacks, notifications, and enabling the connector are unavailable under

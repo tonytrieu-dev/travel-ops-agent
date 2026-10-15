@@ -19,6 +19,11 @@ Feature: Server-backed identity and booking authorization
     Then each attempt is forbidden and the attacking session is revoked
     And the owning traveler can still read the trip
 
+  Scenario: Global execution history applies the trip-read role policy
+    Given an MFA-verified security operator
+    When the operator requests global execution history
+    Then the request is forbidden and the trip-read denial is recorded
+
   Scenario: Slack approval cannot bypass enforced booking authorization
     Given security enforcement is enabled and Slack credentials are configured
     And a pending booking owned by a traveler without verified MFA

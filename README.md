@@ -112,8 +112,8 @@ flowchart LR
     DBOS[DBOS workflows] -.->|checkpoint and replay| Agent
     DBOS -.->|durable booking execute| Repo
     DBOS --> DB
-    API -->|optional| Slack[Slack approval connector]
-    Slack -->|signed callback| API
+    API -->|development only; enforcement off| Slack[Legacy Slack approval connector]
+    Slack -->|signed callback; enforcement off| API
 ```
 
 The critical boundary is deliberate: the LLM researches and proposes; deterministic application
@@ -165,8 +165,9 @@ Cancellation and fare expiry are terminal paths. Every legal transition is valid
 audit table is append-only at the database level: a Postgres trigger rejects updates and deletes.
 The UI's **Approval history** tab shows the booking, route, state transition, human actor, reason,
 and timestamp. Automatic expiry is distinguishable from a human decision because it has no actor.
-Slack is an optional signed approval channel; it can confirm or reject, but cannot bypass the
-state machine or purchase a ticket.
+With enforcement disabled for local development, the legacy Slack connector can confirm or reject
+through the same state machine. Enforcement disables this path because a Slack identity is not an
+authenticated application identity and cannot prove ownership, role, or MFA.
 
 ## Evaluation results
 
@@ -327,10 +328,11 @@ overall itinerary correctness or traveler safety. The default suite is determini
 `--with-judge` opts into the Gemini `FitnessAppropriateness` evaluator. The planner model call is
 live in both modes, so running evals consumes Cerebras quota.
 
-### 7. (Optional) Slack human-in-the-loop approvals
+### 7. (Development only) Legacy Slack human-in-the-loop approvals
 
-Booking approval can be routed through Slack instead of the in-app UI. Slack's Interactivity
-callback needs a public HTTPS URL, so local development requires a tunnel:
+Only when `ZERO_TRUST_ENFORCED=false`, booking approval can be routed through Slack instead of the
+in-app UI. Slack's Interactivity callback needs a public HTTPS URL, so local development requires
+a tunnel:
 
 ```bash
 ngrok http 8000
@@ -338,8 +340,9 @@ ngrok http 8000
 
 Use the printed `https://*.ngrok.io` URL as the Slack app's Request URL. Full setup steps
 (app creation, tokens, channel config) are in [`docs/SLACK_SETUP.md`](docs/SLACK_SETUP.md).
-Nothing here is required for the app to run — without it, the Connectors tab shows the Slack
-toggle greyed out and booking approval stays in-app.
+Nothing here is required for the app to run. Under zero-trust enforcement the Connectors tab keeps
+the Slack toggle unavailable even when credentials are configured, and booking approval stays
+in-app.
 
 ## Key decisions
 

@@ -210,6 +210,11 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/GlobalExecutionPanelOut' }
+        '403':
+          description: The caller's role is not allowed to read trip execution history.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
 
   /api/trips/{trip_id}/booking/request:
     post:

@@ -19,7 +19,7 @@ import pytest
 
 from app.config import Settings
 from app.dependencies import _totp_code
-from app.models import HITLBookingLog, SecurityIncident, TripRequest
+from app.models import HITLBookingLog, SecurityEvent, SecurityIncident, TripRequest
 from app.state import BookingState
 from tests.db_helpers import TEST_DATABASE_URL, run_db
 
@@ -245,6 +245,28 @@ def test_pending_mfa_token_cannot_reach_protected_routes(enforced_client) -> Non
     assert response.json()["mfa_required"] is True
     headers = {"Authorization": f"Bearer {response.json()['access_token']}"}
     assert enforced_client.get("/api/trips", headers=headers).status_code == 403
+
+
+def test_global_execution_history_applies_trip_read_role_policy(enforced_client) -> None:
+    from sqlalchemy import select
+    from sqlmodel import col
+
+    _seed_user("operator@tenant-a.test", "tenant-a", "security-operator", "device-a")
+    token = _sign_in(enforced_client, "operator@tenant-a.test", "device-a")
+
+    response = enforced_client.get(
+        "/api/execution", headers={"Authorization": f"Bearer {token}"}
+    )
+
+    assert response.status_code == 403, response.text
+    denial = run_db(lambda session: session.scalar(
+        select(SecurityEvent).where(
+            col(SecurityEvent.action) == "trip.read",
+            col(SecurityEvent.resource) == "execution",
+            col(SecurityEvent.decision) == "deny",
+        )
+    ))
+    assert denial is not None
 
 
 @pytest.mark.parametrize("enforced", [True, False])
