@@ -6,7 +6,7 @@ model providers are test doubles. No live booking or paid provider calls are par
 
 The default suite runs focused regressions; the latency benchmark is opt-in.
 
-The focused backend suite passed: **50 tests passed, 1 benchmark skipped**. The type checker
+The focused backend suite passed: **45 tests passed, 1 benchmark skipped**. The type checker
 reported **0 errors**.
 
 | Scenario | Observed behavior | Evidence |
@@ -27,7 +27,6 @@ reported **0 errors**.
 | Low-fitness guardrail | High intensity raises a recoverable model retry; moderate intensity passes unchanged | `test_planner_guardrails.py::test_low_fitness_intensity_boundary` |
 | Slack approval boundary | Valid signed callback returns 401 under enforcement without changing booking state or audit; development callback still confirms | `test_signed_slack_approval_requires_development_mode` |
 | MFA input boundary | Six non-ASCII digits return 422 before MFA verification | `test_non_ascii_mfa_digits_are_rejected_before_verification` |
-| Contract references | Every local OpenAPI reference resolves, including the login token response | `test_openapi_contract.py::test_contract_references_resolve` |
 
 The MFA regression was reproduced before the fix: password login returned 200, then the issued
 token received 403 on `/api/trips`. New sessions now start with `mfa_verified=False`; only a
@@ -35,9 +34,8 @@ successful TOTP check changes it to true. Disabling MFA permits ordinary passwor
 access and does not satisfy privileged-action MFA requirements.
 
 The merge-review regressions were run before implementation: the global execution route returned
-200 to a role without `trip.read`, the contract check named the
-missing `TokenOut` schema, a correctly signed Slack approval succeeded under enforcement, and
-non-ASCII MFA digits reached the verifier and returned 500. Each check now passes at its named
+200 to a role without `trip.read`, a correctly signed Slack approval succeeded under enforcement,
+and non-ASCII MFA digits reached the verifier and returned 500. Each check now passes at its named
 boundary. Slack callbacks, notifications, and enabling the connector are unavailable under
 enforcement until clicking users can be checked for ownership, role, and MFA. The connector is
 development-only; it is not a second authenticated approval path.

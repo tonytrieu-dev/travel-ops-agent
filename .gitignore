@@ -22,3 +22,4 @@ frontend/dist/
 
 # Local-only zero-trust write-up (not for git)
 docs/ZERO_TRUST_BEFORE_AFTER.md
+codex-session-*.md

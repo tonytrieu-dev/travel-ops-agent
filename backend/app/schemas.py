@@ -1,8 +1,4 @@
-"""API request/response models — the strictly-typed boundary between HTTP and the domain.
-
-These mirror the authored contract in specs/openapi.yaml; test_openapi_contract asserts the
-runtime schema FastAPI generates from them stays in sync with that file.
-"""
+"""API request/response models — the source of truth for HTTP validation and OpenAPI generation."""
 
 import re
 from datetime import UTC, date, datetime

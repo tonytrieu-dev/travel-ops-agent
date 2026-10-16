@@ -2,11 +2,10 @@
 triggers exist), the FastAPI app wired to it via a synchronous Starlette ``TestClient``, and
 per-test truncation.
 
-Why sync ``TestClient`` rather than an async httpx client: pytest-bdd 8 runs step functions
-synchronously, so the request calls inside steps must be synchronous too. ``TestClient`` drives
-the async app through an anyio portal on a single background event loop — which is exactly what
-makes ``test_double_execute_books_once`` real: two threaded ``execute`` calls become two
-concurrent tasks on that one loop, each with its own DB connection, so the ``SELECT ... FOR
+Why sync ``TestClient`` rather than an async httpx client: route tests make synchronous requests,
+while ``TestClient`` drives the async app through an anyio portal on a single background event
+loop. That is exactly what makes the concurrent execute regression real: two threaded calls become
+two concurrent tasks on that one loop, each with its own DB connection, so the ``SELECT ... FOR
 UPDATE`` in one genuinely blocks the other in Postgres.
 
 Direct DB seeding (a booking already CONFIRMED, or one whose fare has expired) runs through
