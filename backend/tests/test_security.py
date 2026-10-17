@@ -17,26 +17,21 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlmodel import col
 
 from app.config import Settings
-from app.dependencies import (
+from app.security_identity import (
     SecurityContext,
-    _authenticate_identity,
+    authenticate_identity,
     create_security_session,
     issue_access_token,
 )
 from app.models import SecurityEvent, SecurityIncident, SecuritySession, User, utcnow
-from app.repositories.booking_repository import BookingError
 from app.repositories.trips_repository import TripError
-from app.security import (
+from app.security_evidence import (
     DENIAL_THRESHOLD,
-    SecurityError,
-    authorize,
-    enforce_api_segment,
     record_security_event,
-    require_owned_booking,
-    require_owned_trip,
 )
-from app.state import BookingState
-from tests.db_helpers import TEST_DATABASE_URL, run_db, seed_booking, seed_trip
+from app.security_admission import SecurityError, admit_trip, authorize
+from app.security_segment import enforce_api_segment
+from tests.db_helpers import TEST_DATABASE_URL, run_db
 
 _SIGNING_SECRET = "unit-test-signing-secret-at-least-32-bytes"
 
@@ -53,7 +48,7 @@ def _settings(*, enforced: bool) -> Settings:
 
 
 def _patch_settings(monkeypatch: pytest.MonkeyPatch, settings: Settings) -> Iterator[Settings]:
-    for module in ("app.config", "app.security", "app.dependencies"):
+    for module in ("app.config", "app.security_admission"):
         monkeypatch.setattr(f"{module}.get_settings", lambda: settings)
     yield settings
 
@@ -114,7 +109,7 @@ def _events(action: str | None = None, decision: str | None = None) -> list[Secu
 
 
 # --- Identity verification ---------------------------------------------------------------------
-# One test per rejection cause, because each is a separate branch in _authenticate_identity and a
+# One test per rejection cause, because each is a separate branch in authenticate_identity and a
 # separate bug if it regresses: a good token, a forged signature, stale claims, expiry, and
 # revocation. They are not interchangeable — e.g. revocation and expiry are different code paths,
 # and a bug can break one while the other still passes.
@@ -123,7 +118,7 @@ def _events(action: str | None = None, decision: str | None = None) -> list[Secu
 def test_valid_token_bound_to_a_live_session_authenticates(enforced: Settings) -> None:
     async def _work(session: AsyncSession) -> tuple[User, SecurityContext]:
         user = await _add_user(session)
-        return await _authenticate_identity(f"Bearer {await _token(session, user)}", session)
+        return await authenticate_identity(f"Bearer {await _token(session, user)}", session)
 
     user, context = run_db(_work)
     assert context.user_id == user.id
@@ -135,7 +130,7 @@ def test_tampered_token_signature_is_rejected(enforced: Settings) -> None:
         user = await _add_user(session)
         token = await _token(session, user)
         forged = token[:-1] + ("0" if token[-1] != "0" else "1")
-        await _authenticate_identity(f"Bearer {forged}", session)
+        await authenticate_identity(f"Bearer {forged}", session)
 
     with pytest.raises(HTTPException) as error:
         run_db(_work)
@@ -151,7 +146,7 @@ def test_claims_that_disagree_with_persisted_state_are_rejected(enforced: Settin
         token = await _token(session, user)
         user.role = "admin"
         await session.flush()
-        await _authenticate_identity(f"Bearer {token}", session)
+        await authenticate_identity(f"Bearer {token}", session)
 
     with pytest.raises(HTTPException) as error:
         run_db(_work)
@@ -165,7 +160,7 @@ def test_expired_token_is_rejected(enforced: Settings) -> None:
         security_session.mfa_verified = True
         security_session.expires_at = utcnow() - timedelta(minutes=1)
         await session.flush()
-        await _authenticate_identity(
+        await authenticate_identity(
             f"Bearer {issue_access_token(security_session, user, _SIGNING_SECRET)}", session
         )
 
@@ -185,7 +180,7 @@ def test_revoked_session_rejects_an_otherwise_valid_token(enforced: Settings) ->
         token = issue_access_token(security_session, user, _SIGNING_SECRET)
         security_session.revoked_at = utcnow()
         await session.flush()
-        await _authenticate_identity(f"Bearer {token}", session)
+        await authenticate_identity(f"Bearer {token}", session)
 
     with pytest.raises(HTTPException) as error:
         run_db(_work)
@@ -239,47 +234,17 @@ def test_browser_cannot_assert_an_internal_source_segment(enforced: Settings) ->
     assert _events(action="segment.assert", decision="deny")
 
 
-def test_cross_tenant_resource_access_is_denied(enforced: Settings) -> None:
-    """A caller cannot distinguish another tenant's trip from an absent trip."""
+def test_missing_resource_records_denial_when_enforcement_is_disabled(
+    unenforced: Settings,
+) -> None:
+    async def _work(session: AsyncSession) -> None:
+        context = _context(await _add_user(session), mfa_verified=False)
+        with pytest.raises(TripError):
+            await admit_trip(session, context, 999_999, action="trip.read")
 
-    async def _work(session: AsyncSession) -> tuple[TripError, TripError]:
-        trip_id = await seed_trip(session)
-        intruder = await _add_user(session, tenant_id="tenant-b", device_id="device-b")
-        context = _context(intruder, mfa_verified=True)
-        with pytest.raises(TripError) as hidden:
-            await require_owned_trip(session, context, trip_id)
-        with pytest.raises(TripError) as absent:
-            await require_owned_trip(session, context, trip_id + 1)
-        return hidden.value, absent.value
-
-    hidden, absent = run_db(_work)
-    assert (hidden.code, hidden.status_code) == (absent.code, absent.status_code) == (
-        "trip_not_found",
-        404,
-    )
-    assert _events(decision="deny")
-
-
-def test_cross_tenant_booking_is_indistinguishable_from_missing(enforced: Settings) -> None:
-    async def _work(session: AsyncSession) -> tuple[BookingError, BookingError]:
-        booking_id = await seed_booking(
-            session,
-            state=BookingState.PENDING_USER_CONFIRMATION,
-            expires_in_minutes=30,
-        )
-        intruder = await _add_user(session, tenant_id="tenant-b", device_id="device-b")
-        context = _context(intruder, mfa_verified=True)
-        with pytest.raises(BookingError) as hidden:
-            await require_owned_booking(session, context, booking_id)
-        with pytest.raises(BookingError) as absent:
-            await require_owned_booking(session, context, booking_id + 1)
-        return hidden.value, absent.value
-
-    hidden, absent = run_db(_work)
-    assert (hidden.code, hidden.status_code) == (absent.code, absent.status_code) == (
-        "booking_not_found",
-        404,
-    )
+    run_db(_work)
+    events = _events(action="trip.read")
+    assert events and events[-1].decision == "deny"
 
 
 # --- Continuous monitoring ---------------------------------------------------------------------

@@ -23,7 +23,7 @@ from app.routes import auth, booking, connectors, security, slack, trips
 from app.request_context import bind_correlation_id
 from app.routes.connectors import ConnectorError
 from app.schemas import ErrorCode, ProblemDetail
-from app.security import SecurityError
+from app.security_admission import SecurityError
 
 logger = logging.getLogger(__name__)
 

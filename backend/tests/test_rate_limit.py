@@ -52,7 +52,7 @@ async def test_repeated_login_failures_are_rate_limited_by_client_and_normalized
         yield session
 
     app.dependency_overrides[get_session] = _session_override
-    monkeypatch.setattr("app.routes.auth.record_authentication_failure", AsyncMock())
+    monkeypatch.setattr("app.security_identity.record_authentication_failure", AsyncMock())
     transport = httpx.ASGITransport(app=app)
     try:
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -87,7 +87,7 @@ async def test_rotating_login_emails_still_reaches_client_limit(monkeypatch) -> 
         yield session
 
     app.dependency_overrides[get_session] = _session_override
-    monkeypatch.setattr("app.routes.auth.record_authentication_failure", AsyncMock())
+    monkeypatch.setattr("app.security_identity.record_authentication_failure", AsyncMock())
     transport = httpx.ASGITransport(app=app)
     try:
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -120,7 +120,7 @@ async def test_login_rejects_oversized_email_before_database_access(monkeypatch)
         yield session
 
     app.dependency_overrides[get_session] = _session_override
-    monkeypatch.setattr("app.routes.auth.record_authentication_failure", AsyncMock())
+    monkeypatch.setattr("app.security_identity.record_authentication_failure", AsyncMock())
     transport = httpx.ASGITransport(app=app)
     try:
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:

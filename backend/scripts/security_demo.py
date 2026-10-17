@@ -5,7 +5,7 @@ import os
 
 import httpx
 
-from app.dependencies import _totp_code as totp
+from app.security_identity import totp_code as totp
 
 
 def login(client: httpx.Client, email: str, device_id: str) -> str:

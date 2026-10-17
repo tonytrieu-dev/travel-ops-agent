@@ -9,7 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.dependencies import issue_access_token
+from app.security_identity import issue_access_token
 from app.models import SecuritySession, User
 
 pytestmark = pytest.mark.no_database

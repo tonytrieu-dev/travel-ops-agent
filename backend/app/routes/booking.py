@@ -14,7 +14,7 @@ from app.adapters.slack_hitl import notify_pending_approval
 from app.config import get_settings
 from app.db import get_session
 from app.dbos_runtime import execute_booking_durable
-from app.dependencies import SecurityContext, get_current_user, get_security_context
+from app.dependencies import get_current_user, get_security_context
 from app.models import (
     BookingTransition,
     FlightSearchResult,
@@ -24,7 +24,9 @@ from app.models import (
 )
 from app.repositories import booking_repository as repository
 from app.routes.connectors import slack_notifications_enabled
-from app.security import authorize, enforce_api_segment, require_owned_booking, require_owned_trip
+from app.security_admission import admit_booking, admit_trip, authorize
+from app.security_identity import SecurityContext
+from app.security_segment import enforce_api_segment
 from app.request_context import correlation_id
 from app.schemas import (
     BookingLogOut,
@@ -85,8 +87,7 @@ async def request_booking(
     session: AsyncSession = Depends(get_session),
     context: SecurityContext = Depends(get_security_context),
 ) -> BookingLogOut:
-    await authorize(context, session, action="booking.request", resource=f"trip:{trip_id}", request=request)
-    await require_owned_trip(session, context, trip_id, request)
+    await admit_trip(session, context, trip_id, action="booking.request", request=request)
     booking = await repository.request_booking(session, trip_id, body.flight_search_result_id)
     await _notify_slack_if_enabled(session, booking)
     return _to_out(booking)
@@ -126,8 +127,7 @@ async def list_bookings(
 async def get_booking(
     log_id: int, request: Request, session: AsyncSession = Depends(get_session), context: SecurityContext = Depends(get_security_context)
 ) -> BookingLogOut:
-    await authorize(context, session, action="trip.read", resource=f"booking:{log_id}", request=request)
-    await require_owned_booking(session, context, log_id, request)
+    await admit_booking(session, context, log_id, action="booking.read", request=request)
     booking, transitions = await repository.get_booking_with_transitions(session, log_id)
     return _to_out(booking, transitions, await repository.actor_emails_for(session, transitions))
 
@@ -138,8 +138,7 @@ async def get_booking(
 async def confirm_booking(
     log_id: int, request: Request, session: AsyncSession = Depends(get_session), context: SecurityContext = Depends(get_security_context)
 ) -> BookingLogOut:
-    await authorize(context, session, action="booking.approve", resource=f"booking:{log_id}", request=request, require_mfa=True)
-    await require_owned_booking(session, context, log_id, request)
+    await admit_booking(session, context, log_id, action="booking.approve", request=request, require_mfa=True)
     booking = await repository.confirm_booking(session, log_id)
     return _to_out(booking)
 
@@ -148,8 +147,7 @@ async def confirm_booking(
     "/bookings/{log_id}/execute", response_model=BookingLogOut, responses=_EXECUTE_RESPONSES
 )
 async def execute_booking(log_id: int, request: Request, session: AsyncSession = Depends(get_session), context: SecurityContext = Depends(get_security_context)) -> BookingLogOut:
-    await authorize(context, session, action="booking.execute", resource=f"booking:{log_id}", request=request, require_mfa=True)
-    await require_owned_booking(session, context, log_id, request)
+    await admit_booking(session, context, log_id, action="booking.execute", request=request, require_mfa=True)
     return await execute_booking_durable(log_id, correlation_id())
 
 
@@ -159,7 +157,6 @@ async def execute_booking(log_id: int, request: Request, session: AsyncSession =
 async def cancel_booking(
     log_id: int, request: Request, session: AsyncSession = Depends(get_session), context: SecurityContext = Depends(get_security_context)
 ) -> BookingLogOut:
-    await authorize(context, session, action="booking.approve", resource=f"booking:{log_id}", request=request, require_mfa=True)
-    await require_owned_booking(session, context, log_id, request)
+    await admit_booking(session, context, log_id, action="booking.cancel", request=request, require_mfa=True)
     booking = await repository.cancel_booking(session, log_id)
     return _to_out(booking)

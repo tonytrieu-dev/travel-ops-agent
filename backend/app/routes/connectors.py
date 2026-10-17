@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
 from app.db import get_session
-from app.dependencies import SecurityContext, get_security_context
+from app.dependencies import get_security_context
 from app.models import ConnectorSetting
 from app.schemas import (
     ConnectorsOut,
@@ -18,7 +18,9 @@ from app.schemas import (
     ErrorCode,
     ProblemDetail,
 )
-from app.security import authorize, enforce_api_segment
+from app.security_admission import authorize
+from app.security_identity import SecurityContext
+from app.security_segment import enforce_api_segment
 
 router = APIRouter(
     prefix="/api/connectors",

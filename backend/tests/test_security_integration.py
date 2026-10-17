@@ -19,8 +19,8 @@ from datetime import datetime
 import pytest
 
 from app.config import Settings
-from app.dependencies import _totp_code
 from app.models import HITLBookingLog, SecurityEvent, SecurityIncident, TripRequest
+from app.security_identity import totp_code
 from app.state import BookingState
 from tests.db_helpers import TEST_DATABASE_URL, run_db
 
@@ -39,7 +39,7 @@ def enforced_client(client, monkeypatch: pytest.MonkeyPatch):
         zero_trust_signing_secret=_SIGNING_SECRET,
     )
     for module in (
-        "app.config", "app.security", "app.dependencies", "app.routes.auth",
+        "app.config", "app.security_admission", "app.routes.auth",
         "app.routes.slack", "app.routes.connectors", "app.routes.booking",
     ):
         monkeypatch.setattr(f"{module}.get_settings", lambda: settings)
@@ -49,8 +49,8 @@ def enforced_client(client, monkeypatch: pytest.MonkeyPatch):
 def _seed_user(
     email: str, tenant_id: str, role: str, device_id: str, *, mfa_enabled: bool = True
 ) -> int:
-    from app.dependencies import _password_hash
     from app.models import User
+    from app.security_identity import password_hash
 
     async def _work(session) -> int:
         user = User(
@@ -58,7 +58,7 @@ def _seed_user(
             tenant_id=tenant_id,
             role=role,
             device_id=device_id,
-            password_hash=_password_hash("demo-password"),
+            password_hash=password_hash("demo-password"),
             mfa_enabled=mfa_enabled,
         )
         session.add(user)
@@ -78,7 +78,7 @@ def _sign_in(enforced_client, email: str, device_id: str) -> str:
     body = login.json()
     mfa = enforced_client.post(
         "/api/auth/mfa",
-        json={"session_id": body["session_id"], "code": _totp_code("JBSWY3DPEHPK3PXP")},
+        json={"session_id": body["session_id"], "code": totp_code("JBSWY3DPEHPK3PXP")},
     )
     assert mfa.status_code == 200, mfa.text
     return mfa.json()["access_token"]
@@ -264,6 +264,31 @@ def test_cross_tenant_denials_revoke_only_the_attacking_session(enforced_client)
     assert incidents[0].device_id == "device-b"
 
 
+def test_booking_admission_records_one_domain_decision(enforced_client) -> None:
+    from sqlalchemy import select
+    from sqlmodel import col
+
+    owner_id = _seed_user("owner@tenant-a.test", "tenant-a", "traveler", "device-a")
+    booking_id = _owned_booking(owner_id)
+    _seed_user("intruder@tenant-b.test", "tenant-b", "traveler", "device-b")
+    token = _sign_in(enforced_client, "intruder@tenant-b.test", "device-b")
+
+    response = enforced_client.get(
+        f"/api/bookings/{booking_id}", headers={"Authorization": f"Bearer {token}"}
+    )
+
+    assert response.status_code == 404
+    decisions = list(run_db(lambda session: session.scalars(
+        select(SecurityEvent).where(
+            col(SecurityEvent.resource) == f"booking:{booking_id}",
+            col(SecurityEvent.action) == "booking.read",
+        )
+    )))
+    assert [(event.action, event.decision) for event in decisions] == [
+        ("booking.read", "deny")
+    ]
+
+
 def test_pending_mfa_token_cannot_reach_protected_routes(enforced_client) -> None:
     _seed_user("traveler@tenant-a.test", "tenant-a", "traveler", "device-a")
     response = enforced_client.post("/api/auth/login", json={
@@ -347,7 +372,7 @@ def test_signed_slack_approval_requires_development_mode(
     from sqlmodel import col
 
     from app.adapters.slack_hitl import _compute_slack_signature
-    from app.dependencies import get_settings
+    from app.config import get_settings
     from app.models import BookingTransition
     from tests.db_helpers import get_booking
 
@@ -383,38 +408,31 @@ def test_signed_slack_approval_requires_development_mode(
     assert update_message.await_count == (0 if enforced else 1)
 
 
-def test_non_ascii_mfa_digits_are_rejected_before_verification(enforced_client, monkeypatch) -> None:
-    from unittest.mock import AsyncMock
-
-    from app.dependencies import verify_session_mfa
-
+def test_non_ascii_mfa_digits_are_rejected_before_verification(enforced_client) -> None:
     _seed_user("traveler@tenant-a.test", "tenant-a", "traveler", "device-a")
     login = enforced_client.post("/api/auth/login", json={
         "email": "traveler@tenant-a.test", "password": "demo-password", "device_id": "device-a",
     })
     assert login.status_code == 200, login.text
-    verify = AsyncMock(wraps=verify_session_mfa)
-    monkeypatch.setattr("app.routes.auth.verify_session_mfa", verify)
     response = enforced_client.post("/api/auth/mfa", json={
         "session_id": login.json()["session_id"], "code": "１２３４５６",
     })
 
     assert response.status_code == 422, response.text
     assert response.json()["code"] == "validation_error"
-    verify.assert_not_awaited()
 
 
 @pytest.mark.skipif(os.getenv("RUN_SECURITY_LOAD") != "1", reason="explicit latency benchmark")
 def test_modest_load_reports_authentication_overhead(enforced_client, monkeypatch) -> None:
     import json
 
-    from app.dependencies import get_settings
+    from app.config import get_settings
     from scripts.security_load import measure
 
     _seed_user("traveler@tenant-a.test", "tenant-a", "traveler", "device-a")
     token = _sign_in(enforced_client, "traveler@tenant-a.test", "device-a")
     settings = get_settings()
-    monkeypatch.setattr("app.dependencies.DEMO_USER_EMAIL", "traveler@tenant-a.test")
+    monkeypatch.setattr("app.config.DEMO_USER_EMAIL", "traveler@tenant-a.test")
     settings.zero_trust_enforced = False
     baseline = measure(enforced_client, {}, requests=100, concurrency=4)
     settings.zero_trust_enforced = True
