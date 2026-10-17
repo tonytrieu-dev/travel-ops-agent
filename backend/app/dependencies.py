@@ -6,7 +6,7 @@ import hashlib
 import hmac
 import json
 import time
-from datetime import timedelta
+from datetime import UTC, timedelta
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -182,7 +182,7 @@ def issue_access_token(security_session: SecuritySession, user: User, secret: st
         "role": user.role,
         "mfa_verified": security_session.mfa_verified,
         "session_id": security_session.session_id,
-        "expires_at": int(security_session.expires_at.timestamp()),
+        "expires_at": int(security_session.expires_at.replace(tzinfo=UTC).timestamp()),
         # Unique per issuance so re-minting from one session never yields an identical string.
         "jti": uuid4().hex,
     }

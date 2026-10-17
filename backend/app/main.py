@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 import logging
 from uuid import uuid4
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -93,6 +93,20 @@ def create_app() -> FastAPI:
     async def _render_security_error(request: Request, error: SecurityError) -> JSONResponse:
         problem = ProblemDetail(code=ErrorCode.FORBIDDEN, detail=error.detail)
         return JSONResponse(status_code=error.status_code, content=problem.model_dump(mode="json"))
+
+    @app.exception_handler(401)
+    async def _render_authentication_error(
+        request: Request, error: HTTPException
+    ) -> JSONResponse:
+        problem = ProblemDetail(
+            code=ErrorCode.AUTHENTICATION_REQUIRED,
+            detail=str(error.detail),
+        )
+        return JSONResponse(
+            status_code=error.status_code,
+            content=problem.model_dump(mode="json"),
+            headers=error.headers,
+        )
 
     @app.exception_handler(RequestValidationError)
     async def _render_validation_error(

@@ -5,13 +5,15 @@ can act on. Overlapping or trivial-one-liner checks are intentionally absent —
 guarantee lives in test_append_only.py, and login throttling in test_rate_limit.py.
 """
 
+import asyncio
 from collections.abc import Iterator
 from datetime import timedelta
 
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import col
 
 from app.config import Settings
@@ -22,17 +24,21 @@ from app.dependencies import (
     issue_access_token,
 )
 from app.models import SecurityEvent, SecurityIncident, SecuritySession, User, utcnow
+from app.repositories.booking_repository import BookingError
+from app.repositories.trips_repository import TripError
 from app.security import (
     DENIAL_THRESHOLD,
     SecurityError,
     authorize,
     enforce_api_segment,
     record_security_event,
+    require_owned_booking,
     require_owned_trip,
 )
-from tests.db_helpers import TEST_DATABASE_URL, run_db, seed_trip
+from app.state import BookingState
+from tests.db_helpers import TEST_DATABASE_URL, run_db, seed_booking, seed_trip
 
-_SIGNING_SECRET = "unit-test-signing-secret"
+_SIGNING_SECRET = "unit-test-signing-secret-at-least-32-bytes"
 
 
 def _settings(*, enforced: bool) -> Settings:
@@ -234,16 +240,46 @@ def test_browser_cannot_assert_an_internal_source_segment(enforced: Settings) ->
 
 
 def test_cross_tenant_resource_access_is_denied(enforced: Settings) -> None:
-    """Tenant B's traveler must never resolve Tenant A's trip, even with a valid identity."""
+    """A caller cannot distinguish another tenant's trip from an absent trip."""
 
-    async def _work(session: AsyncSession) -> None:
+    async def _work(session: AsyncSession) -> tuple[TripError, TripError]:
         trip_id = await seed_trip(session)
         intruder = await _add_user(session, tenant_id="tenant-b", device_id="device-b")
-        await require_owned_trip(session, _context(intruder, mfa_verified=True), trip_id)
+        context = _context(intruder, mfa_verified=True)
+        with pytest.raises(TripError) as hidden:
+            await require_owned_trip(session, context, trip_id)
+        with pytest.raises(TripError) as absent:
+            await require_owned_trip(session, context, trip_id + 1)
+        return hidden.value, absent.value
 
-    with pytest.raises(SecurityError, match="tenant"):
-        run_db(_work)
+    hidden, absent = run_db(_work)
+    assert (hidden.code, hidden.status_code) == (absent.code, absent.status_code) == (
+        "trip_not_found",
+        404,
+    )
     assert _events(decision="deny")
+
+
+def test_cross_tenant_booking_is_indistinguishable_from_missing(enforced: Settings) -> None:
+    async def _work(session: AsyncSession) -> tuple[BookingError, BookingError]:
+        booking_id = await seed_booking(
+            session,
+            state=BookingState.PENDING_USER_CONFIRMATION,
+            expires_in_minutes=30,
+        )
+        intruder = await _add_user(session, tenant_id="tenant-b", device_id="device-b")
+        context = _context(intruder, mfa_verified=True)
+        with pytest.raises(BookingError) as hidden:
+            await require_owned_booking(session, context, booking_id)
+        with pytest.raises(BookingError) as absent:
+            await require_owned_booking(session, context, booking_id + 1)
+        return hidden.value, absent.value
+
+    hidden, absent = run_db(_work)
+    assert (hidden.code, hidden.status_code) == (absent.code, absent.status_code) == (
+        "booking_not_found",
+        404,
+    )
 
 
 # --- Continuous monitoring ---------------------------------------------------------------------
@@ -324,3 +360,114 @@ def test_one_denial_below_the_threshold_opens_no_incident(enforced: Settings) ->
         ) or 0
 
     assert run_db(_work) == 0
+
+
+def test_denial_threshold_is_scoped_to_one_tenant_and_device(enforced: Settings) -> None:
+    async def _work(session: AsyncSession) -> tuple[int, SecuritySession]:
+        tenant_a = await _add_user(
+            session, tenant_id="tenant-a", device_id="shared-device"
+        )
+        tenant_b = await _add_user(
+            session, tenant_id="tenant-b", device_id="shared-device"
+        )
+        for _ in range(DENIAL_THRESHOLD - 1):
+            await record_security_event(
+                session,
+                _context(tenant_a, mfa_verified=True),
+                action="trip.read",
+                resource="trip:x",
+                decision="deny",
+                reason="forced denial",
+            )
+        security_session = await create_security_session(
+            session, tenant_b, tenant_b.device_id
+        )
+        await record_security_event(
+            session,
+            _context(
+                tenant_b,
+                mfa_verified=True,
+                session_id=security_session.session_id,
+            ),
+            action="trip.read",
+            resource="trip:x",
+            decision="deny",
+            reason="forced denial",
+        )
+        incident_count = await session.scalar(
+            select(func.count(col(SecurityIncident.id)))
+        )
+        await session.refresh(security_session)
+        return incident_count or 0, security_session
+
+    incident_count, security_session = run_db(_work)
+    assert incident_count == 0
+    assert security_session.revoked_at is None
+
+
+def test_only_one_open_incident_exists_per_tenant_device(enforced: Settings) -> None:
+    async def _insert_duplicates(session: AsyncSession) -> None:
+        session.add_all([
+            SecurityIncident(tenant_id="tenant-a", device_id="device-a", reason="first"),
+            SecurityIncident(tenant_id="tenant-a", device_id="device-a", reason="second"),
+        ])
+
+    with pytest.raises(IntegrityError):
+        run_db(_insert_duplicates)
+
+
+def test_concurrent_denials_open_one_incident_and_revoke_the_session(
+    enforced: Settings,
+) -> None:
+    async def _work() -> tuple[int, bool]:
+        engine = create_async_engine(TEST_DATABASE_URL)
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with session_factory() as session:
+                user = await _add_user(session)
+                security_session = await create_security_session(
+                    session, user, user.device_id
+                )
+                context = _context(
+                    user,
+                    mfa_verified=True,
+                    session_id=security_session.session_id,
+                )
+
+            start = asyncio.Barrier(DENIAL_THRESHOLD)
+
+            async def _record_denial() -> None:
+                await start.wait()
+                async with session_factory() as session:
+                    await record_security_event(
+                        session,
+                        context,
+                        action="trip.read",
+                        resource="trip:x",
+                        decision="deny",
+                        reason="forced concurrent denial",
+                    )
+
+            await asyncio.gather(
+                *(_record_denial() for _ in range(DENIAL_THRESHOLD))
+            )
+
+            async with session_factory() as session:
+                incident_count = await session.scalar(
+                    select(func.count(col(SecurityIncident.id))).where(
+                        col(SecurityIncident.tenant_id) == context.tenant_id,
+                        col(SecurityIncident.device_id) == context.device_id,
+                        col(SecurityIncident.status) == "open",
+                    )
+                )
+                persisted_session = await session.scalar(
+                    select(SecuritySession).where(
+                        col(SecuritySession.session_id) == context.session_id
+                    )
+                )
+                assert persisted_session is not None
+                return incident_count or 0, persisted_session.revoked_at is not None
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(_work()) == (1, True)

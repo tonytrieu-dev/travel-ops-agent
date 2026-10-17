@@ -127,15 +127,11 @@ class Settings(BaseSettings):
         return self.database_url.replace("postgresql+asyncpg://", "postgresql://")
 
     @model_validator(mode="after")
-    def _reject_known_weak_signing_secret(self) -> "Settings":
-        # The generated per-process default is safe; only an explicitly-set known-weak value is
-        # rejected, so a demo credential can never slip into an enforced deployment.
-        if self.zero_trust_enforced and self.zero_trust_signing_secret.get_secret_value() in (
-            "local-development-only",
-            "",
-        ):
+    def _reject_weak_signing_secret(self) -> "Settings":
+        signing_secret = self.zero_trust_signing_secret.get_secret_value()
+        if self.zero_trust_enforced and len(signing_secret.encode()) < 32:
             raise ValueError(
-                "ZERO_TRUST_SIGNING_SECRET must be a strong, non-default value when "
+                "ZERO_TRUST_SIGNING_SECRET must be at least 32 bytes when "
                 "ZERO_TRUST_ENFORCED is enabled"
             )
         return self

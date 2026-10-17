@@ -39,7 +39,13 @@ async def login(
 ) -> TokenOut:
     user = await session.scalar(select(User).where(col(User.email) == body.email))
     if user is None or user.disabled or user.device_id != body.device_id or not password_matches(user, body.password):
-        await record_authentication_failure(reason="invalid credentials", request=request)
+        await record_authentication_failure(
+            reason="invalid credentials",
+            tenant_id=user.tenant_id if user else None,
+            actor_user_id=user.id if user else None,
+            device_id=user.device_id if user else None,
+            request=request,
+        )
         raise HTTPException(status_code=401, detail="invalid credentials")
     security_session = await create_security_session(session, user, body.device_id)
     await record_security_event(

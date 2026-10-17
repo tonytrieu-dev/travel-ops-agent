@@ -1,5 +1,7 @@
 """Small security-operations surface for the local enterprise demo."""
 
+from datetime import UTC
+
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,7 +36,12 @@ async def list_security_events(
     if query.action is not None:
         statement = statement.where(col(SecurityEvent.action) == query.action)
     if query.since is not None:
-        statement = statement.where(col(SecurityEvent.created_at) >= query.since.replace(tzinfo=None))
+        since = (
+            query.since.replace(tzinfo=UTC)
+            if query.since.tzinfo is None
+            else query.since.astimezone(UTC)
+        )
+        statement = statement.where(col(SecurityEvent.created_at) >= since.replace(tzinfo=None))
     events = await session.scalars(statement.order_by(col(SecurityEvent.created_at).desc()).limit(200))
     return [SecurityEventOut.model_validate(event) for event in events]
 

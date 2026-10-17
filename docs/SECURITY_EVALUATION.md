@@ -16,7 +16,7 @@ reported **0 errors**.
 | Tampered or expired token | HTTP 401 | Separate signature and expiry regressions in `test_security.py` |
 | Role/MFA escalation | Denied by policy | `test_security.py::test_privileged_action_needs_mfa_and_the_right_role` |
 | Global execution role boundary | Security operator receives 403 and a persisted `trip.read` denial | `test_global_execution_history_applies_trip_read_role_policy` |
-| Cross-tenant access and containment | Five 403 responses, one incident, then 401 for the revoked session; owner still gets 200 | `test_cross_tenant_denials_revoke_only_the_attacking_session` |
+| Cross-tenant access and containment | Five non-disclosing 404 responses, one incident, then 401 for the revoked session; owner still gets 200 | `test_cross_tenant_denials_revoke_only_the_attacking_session` |
 | Browser internal-segment spoof | HTTP 403 and persisted denial event | `test_segment_spoof_header_is_rejected_as_403_through_the_handler`, security policy tests |
 | Append-only enforcement | UPDATE/DELETE rejected for booking transitions, execution events, and security events; security-event TRUNCATE rejected | `test_append_only.py` |
 | Human approval gate | Execute before confirmation returns 409 without contacting the provider or changing booking state | `test_execute_before_confirmation_never_calls_provider` |

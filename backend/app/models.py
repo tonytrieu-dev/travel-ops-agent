@@ -109,6 +109,15 @@ class SecurityEvent(SQLModel, table=True):
 
 class SecurityIncident(SQLModel, table=True):
     __tablename__ = "security_incident"
+    __table_args__ = (
+        Index(
+            "uq_security_incident_open_tenant_device",
+            "tenant_id",
+            "device_id",
+            unique=True,
+            postgresql_where=text("status = 'open'"),
+        ),
+    )
 
     id: int | None = Field(default=None, primary_key=True)
     tenant_id: str = Field(index=True)

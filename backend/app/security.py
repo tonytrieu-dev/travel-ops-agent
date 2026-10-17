@@ -1,8 +1,9 @@
 """Reusable policy, segment, audit, and containment controls."""
 
 from datetime import timedelta
-from fastapi import Depends, HTTPException, Request
-from sqlalchemy import func, select
+from fastapi import Depends, Request
+from sqlalchemy import func, select, text
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
@@ -10,6 +11,7 @@ from app.db import get_session, get_session_factory
 from app.config import get_settings
 from app.dependencies import SecurityContext, get_security_context
 from app.models import SecurityEvent, SecurityIncident, SecuritySession, TripRequest, User, HITLBookingLog, utcnow
+from app.repositories.booking_repository import BookingError
 from app.repositories.trips_repository import TripError
 from app.request_context import correlation_id
 from app.schemas import ErrorCode
@@ -58,6 +60,17 @@ async def record_security_event(
         reason=reason,
         correlation_id=(getattr(request.state, "correlation_id", None) if request else None) or correlation_id(),
     )
+    if decision == "deny":
+        # Serialize one denial window so concurrent transactions cannot each miss the threshold.
+        await session.execute(
+            select(
+                func.pg_advisory_xact_lock(
+                    func.hashtextextended(
+                        f"{event.tenant_id}\x1f{event.device_id}", 0
+                    )
+                )
+            )
+        )
     session.add(event)
     await session.flush()
     if decision == "deny":
@@ -65,27 +78,29 @@ async def record_security_event(
         denied = await session.scalar(
             select(func.count(col(SecurityEvent.id))).where(
                 col(SecurityEvent.device_id) == event.device_id,
+                col(SecurityEvent.tenant_id) == event.tenant_id,
                 col(SecurityEvent.decision) == "deny",
                 col(SecurityEvent.created_at) >= since,
             )
         )
         if denied and denied >= DENIAL_THRESHOLD:
-            existing = await session.scalar(
-                select(SecurityIncident).where(
-                    col(SecurityIncident.device_id) == event.device_id,
-                    col(SecurityIncident.status) == "open",
+            await session.execute(
+                insert(SecurityIncident)
+                .values(
+                    tenant_id=event.tenant_id,
+                    actor_user_id=event.actor_user_id,
+                    device_id=event.device_id,
+                    session_id=event.session_id,
+                    reason=(
+                        f"{DENIAL_THRESHOLD} denied requests in "
+                        f"{DENIAL_WINDOW_MINUTES} minutes"
+                    ),
+                )
+                .on_conflict_do_nothing(
+                    index_elements=["tenant_id", "device_id"],
+                    index_where=text("status = 'open'"),
                 )
             )
-            if existing is None:
-                session.add(
-                    SecurityIncident(
-                        tenant_id=event.tenant_id,
-                        actor_user_id=event.actor_user_id,
-                        device_id=event.device_id,
-                        session_id=event.session_id,
-                        reason=f"{DENIAL_THRESHOLD} denied requests in {DENIAL_WINDOW_MINUTES} minutes",
-                    )
-                )
             if event.session_id:
                 security_session = await session.scalar(
                     select(SecuritySession).where(
@@ -178,7 +193,7 @@ async def require_owned_trip(
             reason="tenant or owner mismatch",
             request=request,
         )
-        raise SecurityError("trip is outside the caller's tenant or ownership scope")
+        raise TripError(ErrorCode.TRIP_NOT_FOUND, 404, f"No trip {trip_id}.")
     return trip
 
 
@@ -187,8 +202,22 @@ async def require_owned_booking(
 ) -> HITLBookingLog:
     booking = await session.get(HITLBookingLog, log_id)
     if booking is None:
-        raise HTTPException(status_code=404, detail=f"No booking log {log_id}.")
-    await require_owned_trip(session, context, booking.trip_request_id, request)
+        await record_security_event(
+            session,
+            context,
+            action="booking.read",
+            resource=f"booking:{log_id}",
+            decision="deny",
+            reason="resource does not exist or is not visible",
+            request=request,
+        )
+        raise BookingError(ErrorCode.BOOKING_NOT_FOUND, 404, f"No booking log {log_id}.")
+    try:
+        await require_owned_trip(session, context, booking.trip_request_id, request)
+    except TripError:
+        raise BookingError(
+            ErrorCode.BOOKING_NOT_FOUND, 404, f"No booking log {log_id}."
+        ) from None
     return booking
 
 

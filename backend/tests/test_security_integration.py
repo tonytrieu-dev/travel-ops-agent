@@ -14,6 +14,7 @@ with enforcement enabled, so legacy tests running in development mode cannot mas
 """
 
 import os
+from datetime import datetime
 
 import pytest
 
@@ -23,7 +24,7 @@ from app.models import HITLBookingLog, SecurityEvent, SecurityIncident, TripRequ
 from app.state import BookingState
 from tests.db_helpers import TEST_DATABASE_URL, run_db
 
-_SIGNING_SECRET = "integration-test-signing-secret"
+_SIGNING_SECRET = "integration-test-signing-secret-at-least-32-bytes"
 
 
 @pytest.fixture
@@ -115,6 +116,32 @@ def test_password_only_login_allows_reads_but_not_booking_approval(enforced_clie
     approval = enforced_client.post(f"/api/bookings/{booking_id}/confirm", headers=headers)
     assert approval.status_code == 403, approval.text
     assert "MFA" in approval.json()["detail"]
+
+
+def test_known_account_login_failure_is_visible_to_its_tenant(enforced_client) -> None:
+    from sqlalchemy import select
+    from sqlmodel import col
+
+    user_id = _seed_user(
+        "traveler@tenant-a.test", "tenant-a", "traveler", "device-a"
+    )
+    response = enforced_client.post("/api/auth/login", json={
+        "email": "traveler@tenant-a.test",
+        "password": "wrong-password",
+        "device_id": "device-a",
+    })
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "authentication_required"
+    event = run_db(lambda session: session.scalar(
+        select(SecurityEvent).where(col(SecurityEvent.action) == "auth.authenticate")
+    ))
+    assert event is not None
+    assert (event.tenant_id, event.actor_user_id, event.device_id) == (
+        "tenant-a",
+        user_id,
+        "device-a",
+    )
 
 
 @pytest.fixture
@@ -226,7 +253,8 @@ def test_cross_tenant_denials_revoke_only_the_attacking_session(enforced_client)
     headers = {"Authorization": f"Bearer {intruder_token}"}
     for _ in range(5):
         response = enforced_client.get(f"/api/trips/{booking.trip_request_id}", headers=headers)
-        assert response.status_code == 403, response.text
+        assert response.status_code == 404, response.text
+        assert response.json()["code"] == "trip_not_found"
     assert enforced_client.get("/api/trips", headers=headers).status_code == 401
     assert enforced_client.get(
         f"/api/trips/{booking.trip_request_id}", headers={"Authorization": f"Bearer {owner_token}"}
@@ -267,6 +295,42 @@ def test_global_execution_history_applies_trip_read_role_policy(enforced_client)
         )
     ))
     assert denial is not None
+
+
+def test_security_event_since_filter_converts_offsets_to_utc(enforced_client) -> None:
+    operator_id = _seed_user(
+        "operator@tenant-a.test", "tenant-a", "security-operator", "device-a"
+    )
+
+    async def _seed_events(session) -> None:
+        for resource, created_at in (
+            ("before", datetime(2026, 1, 1, 7, 30)),
+            ("after", datetime(2026, 1, 1, 8, 30)),
+        ):
+            session.add(SecurityEvent(
+                tenant_id="tenant-a",
+                actor_user_id=operator_id,
+                device_id="device-a",
+                source_segment="web",
+                target_segment="api",
+                action="time-boundary",
+                resource=resource,
+                decision="allow",
+                reason="test event",
+                correlation_id=f"time-boundary-{resource}",
+                created_at=created_at,
+            ))
+
+    run_db(_seed_events)
+    token = _sign_in(enforced_client, "operator@tenant-a.test", "device-a")
+    response = enforced_client.get(
+        "/api/security/events",
+        params={"action": "time-boundary", "since": "2026-01-01T00:00:00-08:00"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert [event["resource"] for event in response.json()] == ["after"]
 
 
 @pytest.mark.parametrize("enforced", [True, False])
@@ -372,6 +436,10 @@ def test_protected_route_without_a_token_is_401_when_enforced(enforced_client) -
         f"an enforced protected route must demand a bearer token, got {response.status_code}: "
         f"{response.text}"
     )
+    assert response.json() == {
+        "code": "authentication_required",
+        "detail": "zero-trust access token required",
+    }
 
 
 def test_full_login_mfa_token_round_trip_reaches_an_owned_resource(enforced_client) -> None:
