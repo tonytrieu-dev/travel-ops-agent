@@ -10,7 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import BookingTransition, ExecutionEvent, ExecutionEventKind
+from app.models import BookingTransition, ExecutionEvent, ExecutionEventKind, SecurityEvent
 from app.state import BookingState
 from tests.db_helpers import get_booking, run_db, seed_booking
 
@@ -48,11 +48,30 @@ async def _seed_event(session: AsyncSession) -> int:
     return event.id
 
 
+async def _seed_security_event(session: AsyncSession) -> int:
+    event = SecurityEvent(
+        tenant_id="tenant-a",
+        device_id="device-a",
+        source_segment="web",
+        target_segment="api",
+        action="test",
+        resource="test",
+        decision="allow",
+        reason="test",
+        correlation_id="correlation-test",
+    )
+    session.add(event)
+    await session.flush()
+    assert event.id is not None
+    return event.id
+
+
 @pytest.mark.parametrize(
     ("table", "seed", "column", "original"),
     [
         ("booking_transition", _seed_transition, "reason", "confirm"),
         ("execution_event", _seed_event, "status", "ok"),
+        ("security_event", _seed_security_event, "reason", "test"),
     ],
 )
 def test_audit_rows_are_append_only(
@@ -86,3 +105,12 @@ def test_audit_rows_are_append_only(
     assert surviving == original, (
         f"{table}.{column} was mutated despite the append-only trigger (got {surviving!r})"
     )
+
+
+def test_security_events_cannot_be_truncated() -> None:
+    row_id = run_db(_seed_security_event)
+    with pytest.raises(DBAPIError, match="(?i)append-only"):
+        run_db(lambda session: session.execute(text("TRUNCATE security_event")))
+    assert run_db(lambda session: session.scalar(
+        text("SELECT id FROM security_event WHERE id = :row_id"), {"row_id": row_id}
+    )) == row_id

@@ -4,12 +4,11 @@ repository module, this is a single row with two simple queries."""
 from typing import Any
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import Settings, get_settings
+from app import config
+from app.adapters.slack_hitl import connector_setting_row, slack_configured
 from app.db import get_session
-from app.models import ConnectorSetting
 from app.schemas import (
     ConnectorsOut,
     ConnectorStatusOut,
@@ -17,8 +16,14 @@ from app.schemas import (
     ErrorCode,
     ProblemDetail,
 )
+from app.security_admission import authorize_route
+from app.security_segment import enforce_api_segment
 
-router = APIRouter(prefix="/api/connectors", tags=["connectors"])
+router = APIRouter(
+    prefix="/api/connectors",
+    tags=["connectors"],
+    dependencies=[Depends(enforce_api_segment)],
+)
 
 _NOT_CONFIGURED: dict[int | str, dict[str, Any]] = {409: {"model": ProblemDetail}}
 
@@ -31,58 +36,44 @@ class ConnectorError(Exception):
         super().__init__(detail)
 
 
-def slack_configured(settings: Settings) -> bool:
-    return bool(
-        settings.slack_bot_token
-        and settings.slack_signing_secret
-        and settings.slack_approvals_channel_id
-    )
-
-
-async def _get_or_create_row(session: AsyncSession) -> ConnectorSetting:
-    row = await session.scalar(select(ConnectorSetting))
-    if row is None:
-        row = ConnectorSetting()
-        session.add(row)
-        await session.commit()
-    return row
-
-
-async def slack_notifications_enabled(session: AsyncSession, settings: Settings) -> bool:
-    """The single definition of "should we post to Slack": configured on this deployment
-    *and* toggled on in ``connector_setting`` — every caller shares this instead of
-    re-deriving the pair independently."""
-    if not slack_configured(settings):
-        return False
-    row = await _get_or_create_row(session)
-    return row.slack_enabled
-
-
-@router.get("", response_model=ConnectorsOut)
-async def get_connectors(session: AsyncSession = Depends(get_session)) -> ConnectorsOut:
-    settings = get_settings()
-    row = await _get_or_create_row(session)
-    return ConnectorsOut(
-        slack=ConnectorStatusOut(configured=slack_configured(settings), enabled=row.slack_enabled)
-    )
-
-
-@router.patch("/slack", response_model=ConnectorsOut, responses=_NOT_CONFIGURED)
-async def set_slack_connector(
-    body: ConnectorToggleUpdate, session: AsyncSession = Depends(get_session)
+@router.get(
+    "",
+    response_model=ConnectorsOut,
+    dependencies=[Depends(authorize_route("connector.configure", "connectors", require_mfa=True))],
+)
+async def get_connectors(
+    session: AsyncSession = Depends(get_session),
 ) -> ConnectorsOut:
-    settings = get_settings()
+    settings = config.get_settings()
+    row = await connector_setting_row(session)
+    configured = slack_configured(settings)
+    return ConnectorsOut(
+        slack=ConnectorStatusOut(configured=configured, enabled=configured and row.slack_enabled)
+    )
+
+
+@router.patch(
+    "/slack",
+    response_model=ConnectorsOut,
+    responses=_NOT_CONFIGURED,
+    dependencies=[Depends(authorize_route("connector.configure", "slack", require_mfa=True))],
+)
+async def set_slack_connector(
+    body: ConnectorToggleUpdate,
+    session: AsyncSession = Depends(get_session),
+) -> ConnectorsOut:
+    settings = config.get_settings()
     if body.enabled and not slack_configured(settings):
         raise ConnectorError(
             ErrorCode.CONNECTOR_NOT_CONFIGURED,
             409,
-            "Slack is not configured on this deployment (missing bot token, signing secret, "
-            "or channel id).",
+            "Slack approvals require configured credentials and development mode.",
         )
-    row = await _get_or_create_row(session)
+    row = await connector_setting_row(session)
     row.slack_enabled = body.enabled
     session.add(row)
     await session.commit()
+    configured = slack_configured(settings)
     return ConnectorsOut(
-        slack=ConnectorStatusOut(configured=slack_configured(settings), enabled=row.slack_enabled)
+        slack=ConnectorStatusOut(configured=configured, enabled=configured and row.slack_enabled)
     )

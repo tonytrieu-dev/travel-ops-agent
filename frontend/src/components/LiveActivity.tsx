@@ -1,6 +1,6 @@
-import { useState } from "react"
-import { useTripExecution } from "../hooks/useTripExecution"
-import { RunStatusDot } from "./RunStatusDot"
+import { useMemo, useState } from "react"
+import { getTripExecution } from "../api/client"
+import { usePolledResource } from "../hooks/usePolledResource"
 
 interface LiveActivityProps {
   tripId: number
@@ -19,7 +19,12 @@ function labelFor(name: string): string {
 // Always polling once a trip exists (not just while a run is active) so this reads as a live
 // activity log, not a banner that vanishes between runs.
 export function LiveActivity({ tripId, isRunActive }: LiveActivityProps) {
-  const { panelData } = useTripExecution({ tripId, enabled: true, isRunActive })
+  const fetcher = useMemo(() => () => getTripExecution(tripId), [tripId])
+  const { data: panelData } = usePolledResource({
+    fetcher,
+    isRunActive,
+    errorText: "Could not load execution data.",
+  })
   const [clearedBeforeSeq, setClearedBeforeSeq] = useState(0)
 
   const events = (panelData?.events ?? []).filter((event) => event.seq > clearedBeforeSeq)
@@ -35,7 +40,14 @@ export function LiveActivity({ tripId, isRunActive }: LiveActivityProps) {
     >
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <RunStatusDot isActive={isRunActive} />
+          {isRunActive ? (
+            <span className="relative flex h-2.5 w-2.5">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-indigo-400 opacity-75" />
+              <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-indigo-500" />
+            </span>
+          ) : (
+            <span className="h-2.5 w-2.5 rounded-full bg-slate-300" />
+          )}
           <h2 className="text-lg font-semibold text-slate-900">
             {isRunActive ? "Agent working…" : "Agent activity"}
           </h2>

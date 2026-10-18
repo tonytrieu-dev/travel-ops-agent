@@ -1,5 +1,5 @@
-// Mirrors backend/specs/openapi.yaml — the source of truth for this contract.
-// Keep field names and shapes exactly in sync with that file, not with assumptions.
+// Mirrors the backend's runtime request and response models.
+// Keep field names and shapes exactly in sync with the backend runtime models, not assumptions.
 
 export type FitnessLevel = "low" | "moderate" | "high"
 
@@ -21,6 +21,8 @@ export type ErrorCode =
   | "validation_error"
   | "rate_limit_exceeded"
   | "connector_not_configured"
+  | "forbidden"
+  | "authentication_required"
 
 export interface ProblemDetail {
   code: ErrorCode

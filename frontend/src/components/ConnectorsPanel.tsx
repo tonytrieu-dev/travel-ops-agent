@@ -49,7 +49,7 @@ export function ConnectorsPanel() {
           </p>
           {!configured && (
             <p className="mt-1 text-sm text-amber-600">
-              Slack credentials not configured on the server.
+              Slack approvals are unavailable on this server.
             </p>
           )}
           {errorMessage && <p className="mt-1 text-sm text-red-600">{errorMessage}</p>}

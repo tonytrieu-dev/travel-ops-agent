@@ -10,8 +10,8 @@ from typing import Any
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.adapters.slack_hitl import notify_pending_approval
-from app.config import get_settings
+from app.adapters.slack_hitl import notify_pending_approval, slack_notifications_enabled
+from app import config
 from app.db import get_session
 from app.dbos_runtime import execute_booking_durable
 from app.dependencies import get_current_user
@@ -23,7 +23,9 @@ from app.models import (
     User,
 )
 from app.repositories import booking_repository as repository
-from app.routes.connectors import slack_notifications_enabled
+from app.security_admission import admit_booking_route, admit_trip_route, authorize_route
+from app.security_segment import enforce_api_segment
+from app.request_context import correlation_id
 from app.schemas import (
     BookingLogOut,
     BookingRequestCreate,
@@ -33,7 +35,11 @@ from app.schemas import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api", tags=["booking"])
+router = APIRouter(
+    prefix="/api",
+    tags=["booking"],
+    dependencies=[Depends(enforce_api_segment)],
+)
 
 _NOT_FOUND: dict[int | str, dict[str, Any]] = {404: {"model": ProblemDetail}}
 _NOT_FOUND_OR_CONFLICT: dict[int | str, dict[str, Any]] = {
@@ -70,7 +76,10 @@ def _to_out(
 
 
 @router.post(
-    "/trips/{trip_id}/booking/request", response_model=BookingLogOut, responses=_NOT_FOUND
+    "/trips/{trip_id}/booking/request",
+    response_model=BookingLogOut,
+    responses=_NOT_FOUND,
+    dependencies=[Depends(admit_trip_route("booking.request"))],
 )
 async def request_booking(
     trip_id: int,
@@ -83,7 +92,7 @@ async def request_booking(
 
 
 async def _notify_slack_if_enabled(session: AsyncSession, booking: HITLBookingLog) -> None:
-    settings = get_settings()
+    settings = config.get_settings()
     if not await slack_notifications_enabled(session, settings):
         return
     trip = await session.get(TripRequest, booking.trip_request_id)
@@ -95,7 +104,11 @@ async def _notify_slack_if_enabled(session: AsyncSession, booking: HITLBookingLo
         logger.warning("booking=%r requested but Slack was not notified", booking.id)
 
 
-@router.get("/bookings", response_model=list[BookingLogOut])
+@router.get(
+    "/bookings",
+    response_model=list[BookingLogOut],
+    dependencies=[Depends(authorize_route("trip.read", "bookings"))],
+)
 async def list_bookings(
     session: AsyncSession = Depends(get_session),
     user: User = Depends(get_current_user),
@@ -109,36 +122,53 @@ async def list_bookings(
     return [_to_out(booking, transitions, actor_emails) for booking, transitions in bookings]
 
 
-@router.get("/bookings/{log_id}", response_model=BookingLogOut, responses=_NOT_FOUND)
+@router.get(
+    "/bookings/{log_id}",
+    response_model=BookingLogOut,
+    responses=_NOT_FOUND,
+    dependencies=[Depends(admit_booking_route("booking.read"))],
+)
 async def get_booking(
-    log_id: int, session: AsyncSession = Depends(get_session)
+    log_id: int,
+    session: AsyncSession = Depends(get_session),
 ) -> BookingLogOut:
     booking, transitions = await repository.get_booking_with_transitions(session, log_id)
     return _to_out(booking, transitions, await repository.actor_emails_for(session, transitions))
 
 
 @router.post(
-    "/bookings/{log_id}/confirm", response_model=BookingLogOut, responses=_NOT_FOUND_OR_CONFLICT
+    "/bookings/{log_id}/confirm",
+    response_model=BookingLogOut,
+    responses=_NOT_FOUND_OR_CONFLICT,
+    dependencies=[Depends(admit_booking_route("booking.approve", require_mfa=True))],
 )
 async def confirm_booking(
-    log_id: int, session: AsyncSession = Depends(get_session)
+    log_id: int,
+    session: AsyncSession = Depends(get_session),
 ) -> BookingLogOut:
     booking = await repository.confirm_booking(session, log_id)
     return _to_out(booking)
 
 
 @router.post(
-    "/bookings/{log_id}/execute", response_model=BookingLogOut, responses=_EXECUTE_RESPONSES
+    "/bookings/{log_id}/execute",
+    response_model=BookingLogOut,
+    responses=_EXECUTE_RESPONSES,
+    dependencies=[Depends(admit_booking_route("booking.execute", require_mfa=True))],
 )
 async def execute_booking(log_id: int) -> BookingLogOut:
-    return await execute_booking_durable(log_id)
+    return await execute_booking_durable(log_id, correlation_id())
 
 
 @router.post(
-    "/bookings/{log_id}/cancel", response_model=BookingLogOut, responses=_NOT_FOUND_OR_CONFLICT
+    "/bookings/{log_id}/cancel",
+    response_model=BookingLogOut,
+    responses=_NOT_FOUND_OR_CONFLICT,
+    dependencies=[Depends(admit_booking_route("booking.cancel", require_mfa=True))],
 )
 async def cancel_booking(
-    log_id: int, session: AsyncSession = Depends(get_session)
+    log_id: int,
+    session: AsyncSession = Depends(get_session),
 ) -> BookingLogOut:
     booking = await repository.cancel_booking(session, log_id)
     return _to_out(booking)

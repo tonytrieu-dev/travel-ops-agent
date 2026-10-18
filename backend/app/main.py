@@ -6,8 +6,10 @@ handler can stay thin and no stack trace or internal ever leaks to the client.
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+import logging
+from uuid import uuid4
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -17,9 +19,13 @@ from app.dbos_runtime import launch_dbos, shutdown_dbos
 from app.rate_limit import RateLimitError
 from app.repositories.booking_repository import BookingError
 from app.repositories.trips_repository import TripError
-from app.routes import booking, connectors, slack, trips
+from app.routes import auth, booking, connectors, security, slack, trips
+from app.request_context import bind_correlation_id
 from app.routes.connectors import ConnectorError
 from app.schemas import ErrorCode, ProblemDetail
+from app.security_admission import SecurityError
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -32,14 +38,36 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title="Travel Agent API", version="0.1.0", lifespan=_lifespan)
+
+    @app.middleware("http")
+    async def correlation_id(request: Request, call_next):
+        request.state.correlation_id = request.headers.get("x-correlation-id") or str(uuid4())
+        with bind_correlation_id(request.state.correlation_id):
+            try:
+                response = await call_next(request)
+            except Exception:
+                logger.exception(
+                    "Unhandled request exception correlation_id=%s",
+                    request.state.correlation_id,
+                )
+                response = JSONResponse(
+                    status_code=500,
+                    content={"detail": "Internal server error"},
+                )
+        response.headers["x-correlation-id"] = request.state.correlation_id
+        return response
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[settings.frontend_origin],
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["x-correlation-id"],
     )
     app.include_router(booking.router)
+    app.include_router(auth.router)
     app.include_router(connectors.router)
+    app.include_router(security.router)
     app.include_router(slack.router)
     app.include_router(trips.router)
 
@@ -59,6 +87,25 @@ def create_app() -> FastAPI:
             status_code=429,
             content=problem.model_dump(mode="json"),
             headers={"Retry-After": str(error.retry_after_seconds)},
+        )
+
+    @app.exception_handler(SecurityError)
+    async def _render_security_error(request: Request, error: SecurityError) -> JSONResponse:
+        problem = ProblemDetail(code=ErrorCode.FORBIDDEN, detail=error.detail)
+        return JSONResponse(status_code=error.status_code, content=problem.model_dump(mode="json"))
+
+    @app.exception_handler(401)
+    async def _render_authentication_error(
+        request: Request, error: HTTPException
+    ) -> JSONResponse:
+        problem = ProblemDetail(
+            code=ErrorCode.AUTHENTICATION_REQUIRED,
+            detail=str(error.detail),
+        )
+        return JSONResponse(
+            status_code=error.status_code,
+            content=problem.model_dump(mode="json"),
+            headers=error.headers,
         )
 
     @app.exception_handler(RequestValidationError)

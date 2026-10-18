@@ -6,18 +6,24 @@ change from the plain, already-tested versions of the functions they call.
 """
 
 from dbos import DBOS, DBOSConfig
-from pydantic_ai import AgentRun, UnexpectedModelBehavior
+from pydantic_ai import UnexpectedModelBehavior
 from pydantic_ai.exceptions import UsageLimitExceeded
+from pydantic_ai.messages import ModelMessage
 from pydantic_ai.models import Model
+from pydantic_ai.usage import RunUsage
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.activities_tavily import TavilyActivityProvider
 from app.adapters.flights_searchapi import get_flight_provider
-from app.agent.execution_log import ExecutionRun, ExecutionService
+from app.agent.execution_log import execution_context
+from app.agent.observability import persist_agent_run
 from app.agent.planner import PlannerDeps, agent, default_usage_limits
 from app.config import CEREBRAS_MODEL, get_settings
 from app.db import get_session_factory
+from app.models import AgentRun as PersistedAgentRun
 from app.models import FlightSearchResult, TripRequest
 from app.rate_limit import acquire_agent_run_slot, release_agent_run_slot
+from app.request_context import bind_correlation_id, correlation_id
 from app.repositories import booking_repository as repository
 from app.schemas import (
     BookingLogOut,
@@ -43,15 +49,23 @@ assert isinstance(agent.model, Model), "agent must be built with a real Model in
 agent.model.request = _as_durable_step("cerebras_request", agent.model.request)
 
 
-async def _persist_failed_run(
-    run: ExecutionRun,
-    agent_run: AgentRun[PlannerDeps, PlannerOutput],
+async def _persist_run(
+    session: AsyncSession,
+    trip_id: int,
+    persisted_run: PersistedAgentRun | None,
+    *,
+    message_history: list[ModelMessage],
+    usage: RunUsage,
+    status: str = "completed",
 ) -> None:
-    # Keeps whatever tool calls ran before the crash on the execution panel, not just successes.
-    await run.persist_result(
-        message_history=agent_run.ctx.state.message_history,
-        usage=agent_run.ctx.state.usage,
-        status="failed",
+    await persist_agent_run(
+        session,
+        trip_request_id=trip_id,
+        model=CEREBRAS_MODEL,
+        message_history=message_history,
+        usage=usage,
+        status=status,
+        agent_run=persisted_run,
     )
 
 
@@ -83,18 +97,19 @@ async def _fetch_booking_options_step(flight: FlightSearchResult) -> list[dict]:
 
 
 @DBOS.workflow(name="execute_booking")
-async def execute_booking_durable(log_id: int) -> BookingLogOut:
-    async with get_session_factory()() as session:
-        booking = await repository.execute_booking(session, log_id, _fetch_booking_options_step)
-        return BookingLogOut.model_validate(booking)
+async def execute_booking_durable(log_id: int, trace_id: str | None = None) -> BookingLogOut:
+    with bind_correlation_id(trace_id):
+        async with get_session_factory()() as session:
+            booking = await repository.execute_booking(session, log_id, _fetch_booking_options_step)
+            return BookingLogOut.model_validate(booking)
 
 
 @DBOS.workflow(name="run_planner")
-async def _run_planner_workflow(trip_id: int, prompt: str) -> PlannerOutput:
+async def _run_planner_workflow(trip_id: int, prompt: str, trace_id: str) -> PlannerOutput:
     settings = get_settings()
     async with (
         get_session_factory()() as session,
-        ExecutionService(session).start_run(trip_id, model=CEREBRAS_MODEL) as run,
+        execution_context(session, trip_id, run_model=CEREBRAS_MODEL, correlation=trace_id) as persisted_run,
     ):
         trip = await session.get(TripRequest, trip_id)
         flight_provider = get_flight_provider(settings)
@@ -113,7 +128,15 @@ async def _run_planner_workflow(trip_id: int, prompt: str) -> PlannerOutput:
                 async for node in agent_run:
                     pass
             except Exception as error:
-                await _persist_failed_run(run, agent_run)
+                # Keeps whatever tool calls ran before the crash on the execution panel, not just successes.
+                await _persist_run(
+                    session,
+                    trip_id,
+                    persisted_run,
+                    message_history=agent_run.ctx.state.message_history,
+                    usage=agent_run.ctx.state.usage,
+                    status="failed",
+                )
                 if isinstance(error, UsageLimitExceeded):
                     # A real, expected outcome on a research-heavy trip (MAX_CONTEXT_TOKENS).
                     return PlanTooComplexOut(
@@ -136,17 +159,23 @@ async def _run_planner_workflow(trip_id: int, prompt: str) -> PlannerOutput:
 
             result = agent_run.result
             assert result is not None, "agent_run finished iterating without producing a result"
-            await run.persist_result(message_history=result.all_messages(), usage=result.usage)
+            await _persist_run(
+                session,
+                trip_id,
+                persisted_run,
+                message_history=result.all_messages(),
+                usage=result.usage,
+            )
     return result.output
 
 
-async def run_planner_durable(trip_id: int, prompt: str) -> PlannerOutput:
+async def run_planner_durable(trip_id: int, prompt: str, trace_id: str | None = None) -> PlannerOutput:
     """Not itself a DBOS workflow: the concurrency slot is plain in-process state, and acquiring
     it inside a replayable workflow body risks a double-acquire if DBOS re-enters that body
     during its own internal record/persist resolution (observed empirically) — so the slot wraps
     the durable call from the outside instead."""
     await acquire_agent_run_slot()
     try:
-        return await _run_planner_workflow(trip_id, prompt)
+        return await _run_planner_workflow(trip_id, prompt, trace_id or correlation_id())
     finally:
         release_agent_run_slot()

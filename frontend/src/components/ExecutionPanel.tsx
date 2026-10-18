@@ -1,12 +1,15 @@
 import { useMemo, useState } from "react"
-import { useAllExecution } from "../hooks/useAllExecution"
+import { getAllExecution } from "../api/client"
 import type { AgentRunOut, AgentRunStepOut, TripRequestOut } from "../api/types"
+import { usePolledResource } from "../hooks/usePolledResource"
 import { FilterSelect } from "./FilterSelect"
 
 interface ExecutionPanelProps {
   trips: TripRequestOut[]
   isRunActive: boolean
 }
+
+const NO_RUNS: AgentRunOut[] = []
 
 function tripLabel(trip: TripRequestOut): string {
   return `${trip.origin} → ${trip.destination_airport}`
@@ -167,7 +170,13 @@ function AgentRunCard({ run, tripLabel }: { run: AgentRunOut; tripLabel: string 
 }
 
 export function ExecutionPanel({ trips, isRunActive }: ExecutionPanelProps) {
-  const { runs: allRuns, errorMessage } = useAllExecution({ isRunActive })
+  const fetcher = useMemo(() => async () => (await getAllExecution()).agent_runs, [])
+  const { data, errorMessage } = usePolledResource<AgentRunOut[]>({
+    fetcher,
+    isRunActive,
+    errorText: "Could not load execution data.",
+  })
+  const allRuns = data ?? NO_RUNS
   const [routeSearch, setRouteSearch] = useState("")
   const [statusFilter, setStatusFilter] = useState("all")
 

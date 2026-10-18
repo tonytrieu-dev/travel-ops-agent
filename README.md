@@ -9,17 +9,74 @@ and propose flights, but it has no tool that can approve or execute booking stat
 > A small reference system for durable AI workflows: the planner is observable and replay-safe,
 > booking requires an explicit human decision, and every decision is persisted as an audit trail.
 
+## Zero-trust enterprise network extension
+
+TravelOps also provides a runnable zero-trust architecture demonstration. Protected API routes
+require a short-lived, server-backed session bound to identity, tenant, role, a device identifier, and MFA when
+zero-trust enforcement is enabled. Tenant ownership and reusable policy checks protect resources;
+security events are append-only and incidents are persisted for review.
+Repeated denials revoke the affected session.
+
+Zero-trust enforcement is **on by default** — every protected API route requires a short-lived
+bearer token, with no toggle to flip first. The classroom issuer uses custom HMAC-signed tokens,
+passwords, and TOTP; it does not implement OIDC discovery or standard OIDC token validation.
+With no `ZERO_TRUST_SIGNING_SECRET` set, the app generates a fresh per-process signing key; set an explicit secret
+for a deployment whose tokens must survive a restart. Production should put Keycloak or another
+OIDC provider in front of the API and use mTLS/service-mesh identity for internal traffic.
+
+The SPA signs in through `POST /api/auth/login`, submits the returned session to
+`POST /api/auth/mfa`, stores the resulting 15-minute bearer token in browser storage, and attaches it
+to every protected request. Set `ZERO_TRUST_SIGNING_SECRET` and use the seeded demo credentials or a
+local user; MFA-enabled users must complete the TOTP step. Connector settings are deployment-wide,
+not tenant-owned, and both reading and changing them require the `security-operator` or `admin` role
+plus verified MFA.
+
+Slack approval callbacks and notifications are disabled while enforcement is enabled, even
+with credentials configured. Slack users are not mapped to trip owners or verified application
+sessions; approve and cancel bookings in the app. The legacy Slack flow is development-only.
+
+Device IDs demonstrate consistency between submitted and stored identity attributes; they do not
+prove device possession or health. Segment checks enforce an application boundary, without
+network segmentation or workload authentication. See the [trust boundaries](docs/ARCHITECTURE.md#zero-trust-enterprise-network-overlay).
+
 ## Start here
 
 - [Architecture](#architecture) — the system boundary and critical request path.
 - [Evaluation results](#evaluation-results) — 84/84 deterministic assertions passed in a 12-run
   sample; the optional quality judge passed 11/12.
+- [Zero-trust demo](#zero-trust-demo) — deterministic identities, MFA, attacks, containment, and
+  security-operations queries.
 - [Engineering decisions](docs/DECISIONS.md) — deeper rationale and trade-offs.
+- [Security evaluation](docs/SECURITY_EVALUATION.md) — PostgreSQL validation, repeatable scenarios,
+  and a modest local latency comparison.
 
 There is no public hosted demo yet. Run the local stack below, or use the walkthrough as a short
 recorded demo script. The project intentionally does not present itself as a production travel
-service: it has no authentication, does not purchase flights, and has not been load-tested or
-security-audited.
+service: it does not purchase flights and has not had production-scale load testing or an
+independent security audit.
+
+## Zero-trust demo
+
+```bash
+docker compose up -d postgres
+cp .env.example .env
+# Enforcement is already on by default; optionally set ZERO_TRUST_SIGNING_SECRET for stable tokens.
+cd backend
+uv run alembic upgrade head
+uv run python -m scripts.seed_security_demo
+uv run python -m scripts.security_demo
+```
+
+The synthetic accounts all use `demo-password` and the TOTP secret
+`JBSWY3DPEHPK3PXP` (the script calculates the current six-digit code). The demo shows a valid
+tenant-scoped request, MFA-gated operator access, token/session rejection,
+browser segment spoof rejection, denials triggering session revocation, and the
+security-operations event/incident query. These are classroom credentials; never reuse them.
+
+For the repeatable PostgreSQL demonstration, including authorized booking, cross-tenant denial,
+tampered tokens, revocation, and preserved workflow/audit behavior after provider failure, follow
+the [evaluation commands](docs/SECURITY_EVALUATION.md). That harness uses isolated test data and
+stubbed external providers; it does not purchase flights or consume model/search quota.
 
 ## Three-minute walkthrough
 
@@ -55,8 +112,8 @@ flowchart LR
     DBOS[DBOS workflows] -.->|checkpoint and replay| Agent
     DBOS -.->|durable booking execute| Repo
     DBOS --> DB
-    API -->|optional| Slack[Slack approval connector]
-    Slack -->|signed callback| API
+    API -->|development only; enforcement off| Slack[Legacy Slack approval connector]
+    Slack -->|signed callback; enforcement off| API
 ```
 
 The critical boundary is deliberate: the LLM researches and proposes; deterministic application
@@ -108,8 +165,9 @@ Cancellation and fare expiry are terminal paths. Every legal transition is valid
 audit table is append-only at the database level: a Postgres trigger rejects updates and deletes.
 The UI's **Approval history** tab shows the booking, route, state transition, human actor, reason,
 and timestamp. Automatic expiry is distinguishable from a human decision because it has no actor.
-Slack is an optional signed approval channel; it can confirm or reject, but cannot bypass the
-state machine or purchase a ticket.
+With enforcement disabled for local development, the legacy Slack connector can confirm or reject
+through the same state machine. Enforcement disables this path because a Slack identity is not an
+authenticated application identity and cannot prove ownership, role, or MFA.
 
 ## Evaluation results
 
@@ -145,9 +203,9 @@ The detailed implementation notes remain in [ARCHITECTURE.md](docs/ARCHITECTURE.
 ## Project status and limitations
 
 This is a portfolio and reference implementation intended for local development and evaluation.
-It is not a production travel service and has not been load tested or security audited. There is
-no authentication: every request currently uses the same demo account, so the application must
-not be exposed as an unrestricted public service. Activity citations show that a URL came from the
+It is not a production travel service; testing includes only modest local load, with no independent
+security audit. The local password/TOTP issuer and tenant/owner checks are bounded demonstration
+controls, not a production identity or device-management system. Activity citations show that a URL came from the
 configured search provider; they do not independently verify every generated claim. The booking
 flow returns third-party checkout links and does not reserve, purchase, or hold a fare.
 
@@ -245,7 +303,14 @@ Frontend serves on `http://localhost:5173` (already whitelisted by the backend's
 cd backend
 uv run pytest -q
 uv run pyrefly check
+# The suite needs PostgreSQL; the subset that does not is marked and can run without it:
+uv run pytest -q -m no_database
 ```
+
+The zero-trust decision path (identity-claim verification, role/MFA policy, tenant ownership,
+browser segment spoofing, denial-threshold containment) is exercised against a live PostgreSQL
+instance by `tests/test_security.py`; the append-only audit guarantee is enforced by a database
+trigger and checked in `tests/test_append_only.py`.
 
 ### 6. Evals
 
@@ -263,10 +328,11 @@ overall itinerary correctness or traveler safety. The default suite is determini
 `--with-judge` opts into the Gemini `FitnessAppropriateness` evaluator. The planner model call is
 live in both modes, so running evals consumes Cerebras quota.
 
-### 7. (Optional) Slack human-in-the-loop approvals
+### 7. (Development only) Legacy Slack human-in-the-loop approvals
 
-Booking approval can be routed through Slack instead of the in-app UI. Slack's Interactivity
-callback needs a public HTTPS URL, so local development requires a tunnel:
+Only when `ZERO_TRUST_ENFORCED=false`, booking approval can be routed through Slack instead of the
+in-app UI. Slack's Interactivity callback needs a public HTTPS URL, so local development requires
+a tunnel:
 
 ```bash
 ngrok http 8000
@@ -274,8 +340,9 @@ ngrok http 8000
 
 Use the printed `https://*.ngrok.io` URL as the Slack app's Request URL. Full setup steps
 (app creation, tokens, channel config) are in [`docs/SLACK_SETUP.md`](docs/SLACK_SETUP.md).
-Nothing here is required for the app to run — without it, the Connectors tab shows the Slack
-toggle greyed out and booking approval stays in-app.
+Nothing here is required for the app to run. Under zero-trust enforcement the Connectors tab keeps
+the Slack toggle unavailable even when credentials are configured, and booking approval stays
+in-app.
 
 ## Key decisions
 

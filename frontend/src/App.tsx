@@ -1,11 +1,16 @@
 import { useCallback, useEffect, useState } from "react"
 import {
+  AUTHENTICATION_REQUIRED_EVENT,
   ApiError,
   createTrip,
+  getAccessToken,
+  getAuthConfig,
   getTripSnapshot,
   listTrips,
+  login,
   planTrip,
   searchTripFlights,
+  verifyMfa,
   updateTrip,
 } from "./api/client"
 import type {
@@ -29,6 +34,63 @@ function extractErrorMessage(error: unknown): string {
   return error instanceof ApiError ? error.message : "Something went wrong. Please try again."
 }
 
+function LoginPanel({ onAuthenticated }: { onAuthenticated: () => void }) {
+  const [email, setEmail] = useState("traveler@tenant-a.test")
+  const [password, setPassword] = useState("")
+  const [deviceId, setDeviceId] = useState("device-a-traveler")
+  const [sessionId, setSessionId] = useState<string | null>(null)
+  const [code, setCode] = useState("")
+  const [error, setError] = useState<string | null>(null)
+
+  const submitLogin = async (event: React.FormEvent) => {
+    event.preventDefault()
+    setError(null)
+    try {
+      const result = await login(email, password, deviceId)
+      if (result.mfa_required) setSessionId(result.session_id)
+      else onAuthenticated()
+    } catch (error) {
+      setError(extractErrorMessage(error))
+    }
+  }
+
+  const submitMfa = async (event: React.FormEvent) => {
+    event.preventDefault()
+    if (!sessionId) return
+    setError(null)
+    try {
+      await verifyMfa(sessionId, code)
+      onAuthenticated()
+    } catch (error) {
+      setError(extractErrorMessage(error))
+    }
+  }
+
+  return (
+    <main className="flex min-h-screen items-center justify-center bg-slate-50 p-6">
+      <form onSubmit={sessionId ? submitMfa : submitLogin} className="w-full max-w-sm space-y-4 rounded-xl bg-white p-6 shadow">
+        <h1 className="text-2xl font-bold">Travel Agent sign in</h1>
+        {!sessionId ? (
+          <>
+            <input aria-label="Email" required type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Email" className="w-full rounded border p-2" />
+            <input aria-label="Password" required type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Password" className="w-full rounded border p-2" />
+            <input aria-label="Device" required value={deviceId} onChange={(event) => setDeviceId(event.target.value)} placeholder="Device ID" className="w-full rounded border p-2" />
+            <button className="w-full rounded bg-indigo-600 p-2 text-white">Continue to MFA</button>
+          </>
+        ) : (
+          <>
+            <label className="block text-sm">Enter your authenticator code
+              <input aria-label="MFA code" required inputMode="numeric" value={code} onChange={(event) => setCode(event.target.value)} className="mt-1 w-full rounded border p-2" />
+            </label>
+            <button className="w-full rounded bg-indigo-600 p-2 text-white">Verify and sign in</button>
+          </>
+        )}
+        {error && <p role="alert" className="text-sm text-red-600">{error}</p>}
+      </form>
+    </main>
+  )
+}
+
 const ACTIVE_TRIP_ID_STORAGE_KEY = "travel-agent.activeTripId"
 
 type TabKey = "trip" | "trips" | "execution" | "approvals" | "connectors"
@@ -42,6 +104,7 @@ const TABS: { key: TabKey; label: string }[] = [
 ]
 
 function App() {
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null)
   const [activeTab, setActiveTab] = useState<TabKey>("trip")
 
   const [trip, setTrip] = useState<TripRequestOut | null>(null)
@@ -61,6 +124,18 @@ function App() {
 
   const isRunActive = isSearchingFlights || isPlanning
 
+  useEffect(() => {
+    const requireAuthentication = () => window.location.reload()
+    window.addEventListener(AUTHENTICATION_REQUIRED_EVENT, requireAuthentication)
+    return () => window.removeEventListener(AUTHENTICATION_REQUIRED_EVENT, requireAuthentication)
+  }, [])
+
+  useEffect(() => {
+    getAuthConfig()
+      .then(({ enforced }) => setIsAuthenticated(!enforced || Boolean(getAccessToken())))
+      .catch(() => setIsAuthenticated(false))
+  }, [])
+
   // Shared by the hard-refresh restore below and by clicking a trip in the sidebar list — both
   // need to load a trip's snapshot into state and remember it as the active trip.
   const restoreTrip = useCallback((tripId: number) => {
@@ -75,18 +150,20 @@ function App() {
   // Restore the active trip after a hard refresh so the execution history survives — React state
   // alone would lose the trip id and leave the ExecutionPanel with nothing to re-fetch.
   useEffect(() => {
+    if (!isAuthenticated) return
     const storedTripId = localStorage.getItem(ACTIVE_TRIP_ID_STORAGE_KEY)
     if (!storedTripId) return
     restoreTrip(Number(storedTripId)).catch(() =>
       localStorage.removeItem(ACTIVE_TRIP_ID_STORAGE_KEY),
     )
-  }, [restoreTrip])
+  }, [isAuthenticated, restoreTrip])
 
   useEffect(() => {
+    if (!isAuthenticated) return
     listTrips()
       .then(setTrips)
       .catch(() => {})
-  }, [])
+  }, [isAuthenticated])
 
   const handleCreateTrip = async (tripRequestCreate: TripRequestCreate) => {
     setIsCreatingTrip(true)
@@ -183,6 +260,9 @@ function App() {
     setSelectedOffer(null)
     setFlightSearchError(null)
   }
+
+  if (isAuthenticated === null) return null
+  if (!isAuthenticated) return <LoginPanel onAuthenticated={() => setIsAuthenticated(true)} />
 
   return (
     <div className="flex min-h-screen flex-col bg-slate-50 text-slate-900 md:flex-row">
