@@ -42,9 +42,9 @@ _ALLOW_REASONS = {"allowed by role policy", "development security enforcement di
 
 
 class SecurityError(Exception):
-    def __init__(self, detail: str, status_code: int = 403) -> None:
+    def __init__(self, detail: str) -> None:
         self.detail = detail
-        self.status_code = status_code
+        self.status_code = 403
         super().__init__(detail)
 
 

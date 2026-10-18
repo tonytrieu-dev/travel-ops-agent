@@ -10,7 +10,7 @@ from typing import Any
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.adapters.slack_hitl import notify_pending_approval
+from app.adapters.slack_hitl import notify_pending_approval, slack_notifications_enabled
 from app import config
 from app.db import get_session
 from app.dbos_runtime import execute_booking_durable
@@ -23,7 +23,6 @@ from app.models import (
     User,
 )
 from app.repositories import booking_repository as repository
-from app.routes.connectors import slack_notifications_enabled
 from app.security_admission import admit_booking_route, admit_trip_route, authorize_route
 from app.security_segment import enforce_api_segment
 from app.request_context import correlation_id

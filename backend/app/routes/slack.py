@@ -11,12 +11,12 @@ from fastapi.responses import JSONResponse, Response
 
 from app.adapters.slack_hitl import (
     resolve_block_action,
+    slack_configured,
     update_approval_message,
     verify_slack_signature,
 )
 from app import config
 from app.db import get_session_factory
-from app.routes.connectors import slack_configured
 from app.schemas import SlackAuthErrorOut
 
 router = APIRouter(prefix="/api/slack", tags=["slack"])
