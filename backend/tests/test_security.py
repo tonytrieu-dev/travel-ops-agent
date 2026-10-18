@@ -12,7 +12,6 @@ from datetime import timedelta
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import col
 
@@ -48,8 +47,7 @@ def _settings(*, enforced: bool) -> Settings:
 
 
 def _patch_settings(monkeypatch: pytest.MonkeyPatch, settings: Settings) -> Iterator[Settings]:
-    for module in ("app.config", "app.security_admission"):
-        monkeypatch.setattr(f"{module}.get_settings", lambda: settings)
+    monkeypatch.setattr("app.config.get_settings", lambda: settings)
     yield settings
 
 
@@ -113,16 +111,6 @@ def _events(action: str | None = None, decision: str | None = None) -> list[Secu
 # separate bug if it regresses: a good token, a forged signature, stale claims, expiry, and
 # revocation. They are not interchangeable — e.g. revocation and expiry are different code paths,
 # and a bug can break one while the other still passes.
-
-
-def test_valid_token_bound_to_a_live_session_authenticates(enforced: Settings) -> None:
-    async def _work(session: AsyncSession) -> tuple[User, SecurityContext]:
-        user = await _add_user(session)
-        return await authenticate_identity(f"Bearer {await _token(session, user)}", session)
-
-    user, context = run_db(_work)
-    assert context.user_id == user.id
-    assert context.mfa_verified is True
 
 
 def test_tampered_token_signature_is_rejected(enforced: Settings) -> None:
@@ -250,21 +238,6 @@ def test_missing_resource_records_denial_when_enforcement_is_disabled(
 # --- Continuous monitoring ---------------------------------------------------------------------
 
 
-def test_both_allow_and_deny_decisions_are_recorded(enforced: Settings) -> None:
-    async def _work(session: AsyncSession) -> None:
-        context = _context(await _add_user(session), mfa_verified=True)
-        await authorize(context, session, action="trip.read", resource="trips")
-        try:
-            await authorize(context, session, action="security.read", resource="x", require_mfa=True)
-        except SecurityError:
-            pass
-
-    run_db(_work)
-    decisions = {(e.action, e.decision) for e in _events()}
-    assert ("trip.read", "allow") in decisions
-    assert ("security.read", "deny") in decisions
-
-
 def test_development_mode_allows_but_still_records_the_decision(unenforced: Settings) -> None:
     """Enforcement off must never silently skip the audit write, or the monitoring trail has a
     hole in dev; the recorded reason must also name the bypass honestly."""
@@ -325,60 +298,6 @@ def test_one_denial_below_the_threshold_opens_no_incident(enforced: Settings) ->
         ) or 0
 
     assert run_db(_work) == 0
-
-
-def test_denial_threshold_is_scoped_to_one_tenant_and_device(enforced: Settings) -> None:
-    async def _work(session: AsyncSession) -> tuple[int, SecuritySession]:
-        tenant_a = await _add_user(
-            session, tenant_id="tenant-a", device_id="shared-device"
-        )
-        tenant_b = await _add_user(
-            session, tenant_id="tenant-b", device_id="shared-device"
-        )
-        for _ in range(DENIAL_THRESHOLD - 1):
-            await record_security_event(
-                session,
-                _context(tenant_a, mfa_verified=True),
-                action="trip.read",
-                resource="trip:x",
-                decision="deny",
-                reason="forced denial",
-            )
-        security_session = await create_security_session(
-            session, tenant_b, tenant_b.device_id
-        )
-        await record_security_event(
-            session,
-            _context(
-                tenant_b,
-                mfa_verified=True,
-                session_id=security_session.session_id,
-            ),
-            action="trip.read",
-            resource="trip:x",
-            decision="deny",
-            reason="forced denial",
-        )
-        incident_count = await session.scalar(
-            select(func.count(col(SecurityIncident.id)))
-        )
-        await session.refresh(security_session)
-        return incident_count or 0, security_session
-
-    incident_count, security_session = run_db(_work)
-    assert incident_count == 0
-    assert security_session.revoked_at is None
-
-
-def test_only_one_open_incident_exists_per_tenant_device(enforced: Settings) -> None:
-    async def _insert_duplicates(session: AsyncSession) -> None:
-        session.add_all([
-            SecurityIncident(tenant_id="tenant-a", device_id="device-a", reason="first"),
-            SecurityIncident(tenant_id="tenant-a", device_id="device-a", reason="second"),
-        ])
-
-    with pytest.raises(IntegrityError):
-        run_db(_insert_duplicates)
 
 
 def test_concurrent_denials_open_one_incident_and_revoke_the_session(

@@ -254,8 +254,7 @@ def client(
         database_url=TEST_DATABASE_URL,
         zero_trust_enforced=False,
     )
-    for module in ("app.config", "app.security_admission"):
-        monkeypatch.setattr(f"{module}.get_settings", lambda: unenforced)
+    monkeypatch.setattr("app.config.get_settings", lambda: unenforced)
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()

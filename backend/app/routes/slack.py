@@ -14,7 +14,7 @@ from app.adapters.slack_hitl import (
     update_approval_message,
     verify_slack_signature,
 )
-from app.config import get_settings
+from app import config
 from app.db import get_session_factory
 from app.routes.connectors import slack_configured
 from app.schemas import SlackAuthErrorOut
@@ -31,7 +31,7 @@ _UNCONFIGURED_OR_UNSIGNED = JSONResponse(
     responses={401: {"model": SlackAuthErrorOut}},
 )
 async def slack_interactions(request: Request) -> Response:
-    settings = get_settings()
+    settings = config.get_settings()
     if not slack_configured(settings):
         return _UNCONFIGURED_OR_UNSIGNED
     assert settings.slack_signing_secret is not None

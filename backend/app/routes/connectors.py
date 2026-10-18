@@ -3,13 +3,13 @@ repository module, this is a single row with two simple queries."""
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import Settings, get_settings
+from app import config
+from app.config import Settings
 from app.db import get_session
-from app.dependencies import get_security_context
 from app.models import ConnectorSetting
 from app.schemas import (
     ConnectorsOut,
@@ -18,8 +18,7 @@ from app.schemas import (
     ErrorCode,
     ProblemDetail,
 )
-from app.security_admission import authorize
-from app.security_identity import SecurityContext
+from app.security_admission import authorize_route
 from app.security_segment import enforce_api_segment
 
 router = APIRouter(
@@ -68,14 +67,15 @@ async def slack_notifications_enabled(session: AsyncSession, settings: Settings)
     return row.slack_enabled
 
 
-@router.get("", response_model=ConnectorsOut)
+@router.get(
+    "",
+    response_model=ConnectorsOut,
+    dependencies=[Depends(authorize_route("connector.configure", "connectors", require_mfa=True))],
+)
 async def get_connectors(
-    request: Request,
     session: AsyncSession = Depends(get_session),
-    context: SecurityContext = Depends(get_security_context),
 ) -> ConnectorsOut:
-    await authorize(context, session, action="connector.configure", resource="connectors", request=request, require_mfa=True)
-    settings = get_settings()
+    settings = config.get_settings()
     row = await _get_or_create_row(session)
     configured = slack_configured(settings)
     return ConnectorsOut(
@@ -83,15 +83,17 @@ async def get_connectors(
     )
 
 
-@router.patch("/slack", response_model=ConnectorsOut, responses=_NOT_CONFIGURED)
+@router.patch(
+    "/slack",
+    response_model=ConnectorsOut,
+    responses=_NOT_CONFIGURED,
+    dependencies=[Depends(authorize_route("connector.configure", "slack", require_mfa=True))],
+)
 async def set_slack_connector(
     body: ConnectorToggleUpdate,
-    request: Request,
     session: AsyncSession = Depends(get_session),
-    context: SecurityContext = Depends(get_security_context),
 ) -> ConnectorsOut:
-    await authorize(context, session, action="connector.configure", resource="slack", request=request, require_mfa=True)
-    settings = get_settings()
+    settings = config.get_settings()
     if body.enabled and not slack_configured(settings):
         raise ConnectorError(
             ErrorCode.CONNECTOR_NOT_CONFIGURED,

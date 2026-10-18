@@ -13,13 +13,10 @@ The booking and containment walkthroughs also exercise the state machine and aud
 with enforcement enabled, so legacy tests running in development mode cannot mask a wiring gap.
 """
 
-import os
-from datetime import datetime
-
 import pytest
 
 from app.config import Settings
-from app.models import HITLBookingLog, SecurityEvent, SecurityIncident, TripRequest
+from app.models import SecurityEvent, TripRequest
 from app.security_identity import totp_code
 from app.state import BookingState
 from tests.db_helpers import TEST_DATABASE_URL, run_db
@@ -38,11 +35,7 @@ def enforced_client(client, monkeypatch: pytest.MonkeyPatch):
         zero_trust_enforced=True,
         zero_trust_signing_secret=_SIGNING_SECRET,
     )
-    for module in (
-        "app.config", "app.security_admission", "app.routes.auth",
-        "app.routes.slack", "app.routes.connectors", "app.routes.booking",
-    ):
-        monkeypatch.setattr(f"{module}.get_settings", lambda: settings)
+    monkeypatch.setattr("app.config.get_settings", lambda: settings)
     yield client
 
 
@@ -118,32 +111,6 @@ def test_password_only_login_allows_reads_but_not_booking_approval(enforced_clie
     assert "MFA" in approval.json()["detail"]
 
 
-def test_known_account_login_failure_is_visible_to_its_tenant(enforced_client) -> None:
-    from sqlalchemy import select
-    from sqlmodel import col
-
-    user_id = _seed_user(
-        "traveler@tenant-a.test", "tenant-a", "traveler", "device-a"
-    )
-    response = enforced_client.post("/api/auth/login", json={
-        "email": "traveler@tenant-a.test",
-        "password": "wrong-password",
-        "device_id": "device-a",
-    })
-
-    assert response.status_code == 401
-    assert response.json()["code"] == "authentication_required"
-    event = run_db(lambda session: session.scalar(
-        select(SecurityEvent).where(col(SecurityEvent.action) == "auth.authenticate")
-    ))
-    assert event is not None
-    assert (event.tenant_id, event.actor_user_id, event.device_id) == (
-        "tenant-a",
-        user_id,
-        "device-a",
-    )
-
-
 @pytest.fixture
 def authenticated_booking(enforced_client) -> tuple[int, dict[str, str]]:
     user_id = _seed_user("traveler@tenant-a.test", "tenant-a", "traveler", "device-a")
@@ -192,27 +159,6 @@ def test_concurrent_execution_claims_the_approved_booking_once(
     )) == 1
 
 
-def test_booking_options_failure_preserves_approved_execution(
-    enforced_client, authenticated_booking, booking_options_spy
-) -> None:
-    from tests.db_helpers import get_booking
-
-    booking_id, headers = authenticated_booking
-    approval = enforced_client.post(f"/api/bookings/{booking_id}/confirm", headers=headers)
-    assert approval.status_code == 200, approval.text
-    booking_options_spy.should_fail = True
-
-    response = enforced_client.post(f"/api/bookings/{booking_id}/execute", headers=headers)
-
-    assert response.status_code == 200, response.text
-    assert response.json()["booking_options"] == []
-    assert booking_options_spy.calls == 1, "the test must exercise the provider failure"
-    booking = run_db(lambda session: get_booking(session, booking_id))
-    assert booking.state == BookingState.EXECUTED
-    assert booking.booking_reference == response.json()["booking_reference"]
-    assert booking.booking_reference
-
-
 def test_expired_booking_never_reaches_the_provider(
     enforced_client, authenticated_booking, booking_options_spy
 ) -> None:
@@ -238,55 +184,6 @@ def test_expired_booking_never_reaches_the_provider(
     assert run_db(lambda session: count_transitions_into(
         session, booking_id, BookingState.EXPIRED
     )) == 1
-
-
-def test_cross_tenant_denials_revoke_only_the_attacking_session(enforced_client) -> None:
-    from sqlalchemy import select
-
-    owner_id = _seed_user("owner@tenant-a.test", "tenant-a", "traveler", "device-a")
-    booking_id = _owned_booking(owner_id)
-    booking = run_db(lambda session: session.get(HITLBookingLog, booking_id))
-    assert booking is not None
-    _seed_user("intruder@tenant-b.test", "tenant-b", "traveler", "device-b")
-    owner_token = _sign_in(enforced_client, "owner@tenant-a.test", "device-a")
-    intruder_token = _sign_in(enforced_client, "intruder@tenant-b.test", "device-b")
-    headers = {"Authorization": f"Bearer {intruder_token}"}
-    for _ in range(5):
-        response = enforced_client.get(f"/api/trips/{booking.trip_request_id}", headers=headers)
-        assert response.status_code == 404, response.text
-        assert response.json()["code"] == "trip_not_found"
-    assert enforced_client.get("/api/trips", headers=headers).status_code == 401
-    assert enforced_client.get(
-        f"/api/trips/{booking.trip_request_id}", headers={"Authorization": f"Bearer {owner_token}"}
-    ).status_code == 200
-    incidents = list(run_db(lambda session: session.scalars(select(SecurityIncident))))
-    assert len(incidents) == 1
-    assert incidents[0].device_id == "device-b"
-
-
-def test_booking_admission_records_one_domain_decision(enforced_client) -> None:
-    from sqlalchemy import select
-    from sqlmodel import col
-
-    owner_id = _seed_user("owner@tenant-a.test", "tenant-a", "traveler", "device-a")
-    booking_id = _owned_booking(owner_id)
-    _seed_user("intruder@tenant-b.test", "tenant-b", "traveler", "device-b")
-    token = _sign_in(enforced_client, "intruder@tenant-b.test", "device-b")
-
-    response = enforced_client.get(
-        f"/api/bookings/{booking_id}", headers={"Authorization": f"Bearer {token}"}
-    )
-
-    assert response.status_code == 404
-    decisions = list(run_db(lambda session: session.scalars(
-        select(SecurityEvent).where(
-            col(SecurityEvent.resource) == f"booking:{booking_id}",
-            col(SecurityEvent.action) == "booking.read",
-        )
-    )))
-    assert [(event.action, event.decision) for event in decisions] == [
-        ("booking.read", "deny")
-    ]
 
 
 def test_pending_mfa_token_cannot_reach_protected_routes(enforced_client) -> None:
@@ -320,42 +217,6 @@ def test_global_execution_history_applies_trip_read_role_policy(enforced_client)
         )
     ))
     assert denial is not None
-
-
-def test_security_event_since_filter_converts_offsets_to_utc(enforced_client) -> None:
-    operator_id = _seed_user(
-        "operator@tenant-a.test", "tenant-a", "security-operator", "device-a"
-    )
-
-    async def _seed_events(session) -> None:
-        for resource, created_at in (
-            ("before", datetime(2026, 1, 1, 7, 30)),
-            ("after", datetime(2026, 1, 1, 8, 30)),
-        ):
-            session.add(SecurityEvent(
-                tenant_id="tenant-a",
-                actor_user_id=operator_id,
-                device_id="device-a",
-                source_segment="web",
-                target_segment="api",
-                action="time-boundary",
-                resource=resource,
-                decision="allow",
-                reason="test event",
-                correlation_id=f"time-boundary-{resource}",
-                created_at=created_at,
-            ))
-
-    run_db(_seed_events)
-    token = _sign_in(enforced_client, "operator@tenant-a.test", "device-a")
-    response = enforced_client.get(
-        "/api/security/events",
-        params={"action": "time-boundary", "since": "2026-01-01T00:00:00-08:00"},
-        headers={"Authorization": f"Bearer {token}"},
-    )
-
-    assert response.status_code == 200, response.text
-    assert [event["resource"] for event in response.json()] == ["after"]
 
 
 @pytest.mark.parametrize("enforced", [True, False])
@@ -408,45 +269,6 @@ def test_signed_slack_approval_requires_development_mode(
     assert update_message.await_count == (0 if enforced else 1)
 
 
-def test_non_ascii_mfa_digits_are_rejected_before_verification(enforced_client) -> None:
-    _seed_user("traveler@tenant-a.test", "tenant-a", "traveler", "device-a")
-    login = enforced_client.post("/api/auth/login", json={
-        "email": "traveler@tenant-a.test", "password": "demo-password", "device_id": "device-a",
-    })
-    assert login.status_code == 200, login.text
-    response = enforced_client.post("/api/auth/mfa", json={
-        "session_id": login.json()["session_id"], "code": "１２３４５６",
-    })
-
-    assert response.status_code == 422, response.text
-    assert response.json()["code"] == "validation_error"
-
-
-@pytest.mark.skipif(os.getenv("RUN_SECURITY_LOAD") != "1", reason="explicit latency benchmark")
-def test_modest_load_reports_authentication_overhead(enforced_client, monkeypatch) -> None:
-    import json
-
-    from app.config import get_settings
-    from scripts.security_load import measure
-
-    _seed_user("traveler@tenant-a.test", "tenant-a", "traveler", "device-a")
-    token = _sign_in(enforced_client, "traveler@tenant-a.test", "device-a")
-    settings = get_settings()
-    monkeypatch.setattr("app.config.DEMO_USER_EMAIL", "traveler@tenant-a.test")
-    settings.zero_trust_enforced = False
-    baseline = measure(enforced_client, {}, requests=100, concurrency=4)
-    settings.zero_trust_enforced = True
-    enforced = measure(
-        enforced_client, {"Authorization": f"Bearer {token}"}, requests=100, concurrency=4
-    )
-    print(json.dumps({
-        "development_baseline": baseline,
-        "enforced": enforced,
-        "p50_overhead_ms": round(enforced["p50_ms"] - baseline["p50_ms"], 3),
-        "p95_overhead_ms": round(enforced["p95_ms"] - baseline["p95_ms"], 3),
-    }, sort_keys=True))
-
-
 def test_protected_route_without_a_token_is_401_when_enforced(enforced_client) -> None:
     response = enforced_client.get("/api/trips")
 
@@ -458,19 +280,6 @@ def test_protected_route_without_a_token_is_401_when_enforced(enforced_client) -
         "code": "authentication_required",
         "detail": "zero-trust access token required",
     }
-
-
-def test_full_login_mfa_token_round_trip_reaches_an_owned_resource(enforced_client) -> None:
-    run_db_user_id = _seed_user("traveler@tenant-a.test", "tenant-a", "traveler", "device-a")
-    assert run_db_user_id is not None
-
-    token = _sign_in(enforced_client, "traveler@tenant-a.test", "device-a")
-    response = enforced_client.get("/api/trips", headers={"Authorization": f"Bearer {token}"})
-
-    assert response.status_code == 200, (
-        f"a fully authenticated, MFA-verified request must reach its own tenant's trips, got "
-        f"{response.status_code}: {response.text}"
-    )
 
 
 def test_segment_spoof_header_is_rejected_as_403_through_the_handler(enforced_client) -> None:

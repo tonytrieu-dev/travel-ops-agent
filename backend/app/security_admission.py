@@ -1,9 +1,19 @@
-"""Protected-resource admission: policy, ownership, hiding, and one decision."""
+"""Protected-resource admission: policy, ownership, hiding, and one decision.
 
-from fastapi import Request
+Routes attach admission as a dependency, not a call: `Depends(admit_trip_route("trip.read"))`
+and `Depends(admit_booking_route("booking.approve", require_mfa=True))` declare the action and
+MFA requirement once per route and return the owned object, so handlers never thread
+request/session/context/correlation plumbing themselves.
+"""
+
+from collections.abc import Awaitable, Callable
+
+from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_settings
+from app import config
+from app.db import get_session
+from app.dependencies import get_security_context
 from app.models import HITLBookingLog, TripRequest, User
 from app.repositories.booking_repository import BookingError
 from app.repositories.trips_repository import TripError
@@ -41,7 +51,7 @@ class SecurityError(Exception):
 def _authorization_reason(
     context: SecurityContext, action: str, require_mfa: bool
 ) -> str:
-    if not get_settings().zero_trust_enforced:
+    if not config.get_settings().zero_trust_enforced:
         return "development security enforcement disabled"
     if action not in _ROLE_ACTIONS.get(context.role, set()):
         return "role is not allowed to perform action"
@@ -83,7 +93,7 @@ async def _admit(
 ) -> None:
     if not exists:
         reason = "resource does not exist or is not visible"
-    elif get_settings().zero_trust_enforced and not owned:
+    elif config.get_settings().zero_trust_enforced and not owned:
         reason = "tenant or owner mismatch"
     else:
         reason = _authorization_reason(context, action, require_mfa)
@@ -149,3 +159,57 @@ async def admit_booking(
     if booking is None:
         raise not_found
     return booking
+
+
+# --- Route dependencies -----------------------------------------------------------------------
+# The gate's action and MFA requirement are static per route, so each route declares them once as
+# a dependency instead of repeating a four-argument call plus request/session/context params in
+# every handler body.
+
+
+def admit_trip_route(
+    action: str, *, require_mfa: bool = False
+) -> Callable[..., Awaitable[TripRequest]]:
+    async def dependency(
+        trip_id: int,
+        request: Request,
+        session: AsyncSession = Depends(get_session),
+        context: SecurityContext = Depends(get_security_context),
+    ) -> TripRequest:
+        return await admit_trip(
+            session, context, trip_id, action=action, request=request, require_mfa=require_mfa
+        )
+
+    return dependency
+
+
+def admit_booking_route(
+    action: str, *, require_mfa: bool = False
+) -> Callable[..., Awaitable[HITLBookingLog]]:
+    async def dependency(
+        log_id: int,
+        request: Request,
+        session: AsyncSession = Depends(get_session),
+        context: SecurityContext = Depends(get_security_context),
+    ) -> HITLBookingLog:
+        return await admit_booking(
+            session, context, log_id, action=action, request=request, require_mfa=require_mfa
+        )
+
+    return dependency
+
+
+def authorize_route(
+    action: str, resource: str, *, require_mfa: bool = False
+) -> Callable[..., Awaitable[None]]:
+    async def dependency(
+        request: Request,
+        session: AsyncSession = Depends(get_session),
+        context: SecurityContext = Depends(get_security_context),
+    ) -> None:
+        await authorize(
+            context, session, action=action, resource=resource,
+            request=request, require_mfa=require_mfa,
+        )
+
+    return dependency

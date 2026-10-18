@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_settings
+from app import config
 from app.db import get_session
 from app.schemas import LoginRequest, MfaVerifyRequest, ProblemDetail, TokenOut
 from app.security_identity import login_identity, verify_identity_mfa
@@ -14,7 +14,7 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 @router.get("/config")
 async def auth_config() -> dict[str, bool]:
-    return {"enforced": get_settings().zero_trust_enforced}
+    return {"enforced": config.get_settings().zero_trust_enforced}
 
 
 @router.post(

@@ -32,6 +32,9 @@ class SecurityContext:
     session_id: str | None = None
 
 
+# --- Inbound token verification: decode a bearer token and reconcile its claims with live state
+
+
 def _context_from_claims(claims: dict[str, object], user: User) -> SecurityContext:
     if user.id is None or user.disabled:
         raise HTTPException(status_code=403, detail="identity is disabled or unknown")
@@ -121,6 +124,9 @@ async def _authenticated_identity(
         raise
 
 
+# --- Credential primitives: pure, no DB or request state (directly unit-tested)
+
+
 def password_hash(password: str) -> str:
     return hashlib.pbkdf2_hmac("sha256", password.encode(), b"travelops-demo", 120_000).hex()
 
@@ -137,6 +143,9 @@ def totp_code(secret: str, timestamp: int | None = None) -> str:
 
 def password_matches(user: User, password: str) -> bool:
     return bool(user.password_hash) and hmac.compare_digest(user.password_hash, password_hash(password))
+
+
+# --- Session lifecycle: create a pending session and upgrade it once MFA is verified
 
 
 async def create_security_session(
@@ -163,6 +172,9 @@ async def verify_session_mfa(
     security_session.mfa_verified = True
     await session.commit()
     return True
+
+
+# --- Token issuance: mint a signed bearer token from a session
 
 
 def issue_access_token(security_session: SecuritySession, user: User, secret: str) -> str:
@@ -193,6 +205,9 @@ def _token_out(security_session: SecuritySession, user: User, mfa_required: bool
         session_id=security_session.session_id,
         mfa_required=mfa_required,
     )
+
+
+# --- Request flows: the module's external interface called by the auth routes and dependencies
 
 
 async def login_identity(

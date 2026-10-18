@@ -5,21 +5,21 @@ raise TripError, rendered as a ProblemDetail by the app-level handler in main.py
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.flights_searchapi import derive_flight_legs, get_flight_provider
 from app.agent.execution_log import execution_context
+from app import config
 from app.config import (
     LLM_INPUT_PRICE_PER_MILLION_TOKENS,
     LLM_OUTPUT_PRICE_PER_MILLION_TOKENS,
     MAX_CONTEXT_TOKENS,
-    get_settings,
 )
 from app.db import get_session
 from app.dbos_runtime import run_planner_durable
-from app.dependencies import get_current_user, get_security_context
-from app.models import AgentRun, AgentRunStep, ExecutionEvent, User
+from app.dependencies import get_current_user
+from app.models import AgentRun, AgentRunStep, ExecutionEvent, TripRequest, User
 from app.rate_limit import enforce_request_rate_limit
 from app.repositories import trips_repository as repository
 from app.schemas import (
@@ -44,8 +44,7 @@ from app.schemas import (
     TripSnapshotOut,
 )
 from app.services.flight_search import FlightSearchService, flight_provider_name
-from app.security_admission import admit_trip, authorize
-from app.security_identity import SecurityContext
+from app.security_admission import admit_trip_route, authorize_route
 from app.security_segment import enforce_api_segment
 from app.request_context import correlation_id
 
@@ -67,48 +66,52 @@ _NOT_FOUND_OR_RATE_LIMITED: dict[int | str, dict[str, Any]] = {
 }
 
 
-@router.post("/trips", response_model=TripRequestOut, responses=_VALIDATION)
+@router.post(
+    "/trips",
+    response_model=TripRequestOut,
+    responses=_VALIDATION,
+    dependencies=[Depends(authorize_route("trip.create", "trip"))],
+)
 async def create_trip(
     body: TripRequestCreate,
-    request: Request,
     session: AsyncSession = Depends(get_session),
     user: User = Depends(get_current_user),
-    context: SecurityContext = Depends(get_security_context),
 ) -> TripRequestOut:
-    await authorize(context, session, action="trip.create", resource="trip", request=request)
     assert user.id is not None, "get_current_user must always return a persisted user"
     trip = await repository.create_trip(session, user.id, body)
     return TripRequestOut.model_validate(trip)
 
 
-@router.get("/trips", response_model=list[TripRequestOut])
+@router.get(
+    "/trips",
+    response_model=list[TripRequestOut],
+    dependencies=[Depends(authorize_route("trip.read", "trips"))],
+)
 async def list_trips(
-    request: Request,
     session: AsyncSession = Depends(get_session),
     user: User = Depends(get_current_user),
-    context: SecurityContext = Depends(get_security_context),
 ) -> list[TripRequestOut]:
-    await authorize(context, session, action="trip.read", resource="trips", request=request)
     assert user.id is not None, "get_current_user must always return a persisted user"
     trips = await repository.list_trips(session, user.id)
     return [TripRequestOut.model_validate(trip) for trip in trips]
 
 
 @router.get("/trips/{trip_id}", response_model=TripRequestOut, responses=_NOT_FOUND)
-async def get_trip(
-    trip_id: int, request: Request, session: AsyncSession = Depends(get_session), context: SecurityContext = Depends(get_security_context)
-) -> TripRequestOut:
-    trip = await admit_trip(session, context, trip_id, action="trip.read", request=request)
+async def get_trip(trip: TripRequest = Depends(admit_trip_route("trip.read"))) -> TripRequestOut:
     return TripRequestOut.model_validate(trip)
 
 
 @router.patch(
-    "/trips/{trip_id}", response_model=TripRequestOut, responses=_NOT_FOUND_OR_VALIDATION
+    "/trips/{trip_id}",
+    response_model=TripRequestOut,
+    responses=_NOT_FOUND_OR_VALIDATION,
+    dependencies=[Depends(admit_trip_route("trip.update"))],
 )
 async def update_trip(
-    trip_id: int, body: TripRequestUpdate, request: Request, session: AsyncSession = Depends(get_session), context: SecurityContext = Depends(get_security_context)
+    trip_id: int,
+    body: TripRequestUpdate,
+    session: AsyncSession = Depends(get_session),
 ) -> TripRequestOut:
-    await admit_trip(session, context, trip_id, action="trip.update", request=request)
     trip = await repository.update_trip(session, trip_id, body)
     return TripRequestOut.model_validate(trip)
 
@@ -119,11 +122,16 @@ def _to_flight_offer_out(offer: Any) -> FlightOfferOut:
     return offer_out
 
 
-@router.get("/trips/{trip_id}/snapshot", response_model=TripSnapshotOut, responses=_NOT_FOUND)
+@router.get(
+    "/trips/{trip_id}/snapshot",
+    response_model=TripSnapshotOut,
+    responses=_NOT_FOUND,
+    dependencies=[Depends(admit_trip_route("trip.read"))],
+)
 async def get_trip_snapshot(
-    trip_id: int, request: Request, session: AsyncSession = Depends(get_session), context: SecurityContext = Depends(get_security_context)
+    trip_id: int,
+    session: AsyncSession = Depends(get_session),
 ) -> TripSnapshotOut:
-    await admit_trip(session, context, trip_id, action="trip.read", request=request)
     trip, offers, itinerary, is_stale = await repository.get_trip_snapshot(session, trip_id)
     return TripSnapshotOut(
         trip=TripRequestOut.model_validate(trip),
@@ -143,13 +151,15 @@ async def get_trip_snapshot(
     "/trips/{trip_id}/flights/search",
     response_model=FlightSearchOut,
     responses=_NOT_FOUND_OR_RATE_LIMITED,
-    dependencies=[Depends(enforce_request_rate_limit)],
+    dependencies=[
+        Depends(admit_trip_route("flight.search")),
+        Depends(enforce_request_rate_limit),
+    ],
 )
 async def search_trip_flights(
-    trip_id: int, request: Request, session: AsyncSession = Depends(get_session), context: SecurityContext = Depends(get_security_context)
+    trip_id: int, session: AsyncSession = Depends(get_session)
 ) -> FlightSearchOut:
-    await admit_trip(session, context, trip_id, action="flight.search", request=request)
-    provider = get_flight_provider(get_settings())
+    provider = get_flight_provider(config.get_settings())
     await repository.get_trip(session, trip_id)
     async with execution_context(
         session, trip_id, run_model=flight_provider_name(provider)
@@ -166,15 +176,15 @@ async def search_trip_flights(
     "/trips/{trip_id}/plan",
     response_model=PlanOut,
     responses=_NOT_FOUND_OR_RATE_LIMITED,
-    dependencies=[Depends(enforce_request_rate_limit)],
+    dependencies=[
+        Depends(admit_trip_route("trip.plan")),
+        Depends(enforce_request_rate_limit),
+    ],
 )
 async def plan_trip(
     trip_id: int,
-    request: Request,
     session: AsyncSession = Depends(get_session),
-    context: SecurityContext = Depends(get_security_context),
 ) -> PlanOut:
-    await admit_trip(session, context, trip_id, action="trip.plan", request=request)
     output = await repository.get_or_create_itinerary(
         session, trip_id, lambda trip_id, prompt: run_planner_durable(trip_id, prompt, correlation_id())
     )
@@ -222,25 +232,30 @@ def _to_panel_out(
     )
 
 
-@router.get("/trips/{trip_id}/execution", response_model=ExecutionPanelOut, responses=_NOT_FOUND)
+@router.get(
+    "/trips/{trip_id}/execution",
+    response_model=ExecutionPanelOut,
+    responses=_NOT_FOUND,
+    dependencies=[Depends(admit_trip_route("trip.execution.read"))],
+)
 async def get_trip_execution(
-    trip_id: int, request: Request, session: AsyncSession = Depends(get_session), context: SecurityContext = Depends(get_security_context)
+    trip_id: int,
+    session: AsyncSession = Depends(get_session),
 ) -> ExecutionPanelOut:
-    await admit_trip(session, context, trip_id, action="trip.execution.read", request=request)
     runs_with_details, events = await repository.get_execution_panel(session, trip_id)
     return _to_panel_out(trip_id, runs_with_details, events)
 
 
 @router.get(
-    "/execution", response_model=GlobalExecutionPanelOut, responses={403: {"model": ProblemDetail}}
+    "/execution",
+    response_model=GlobalExecutionPanelOut,
+    responses={403: {"model": ProblemDetail}},
+    dependencies=[Depends(authorize_route("trip.read", "execution"))],
 )
 async def get_all_execution(
-    request: Request,
     session: AsyncSession = Depends(get_session),
     user: User = Depends(get_current_user),
-    context: SecurityContext = Depends(get_security_context),
 ) -> GlobalExecutionPanelOut:
-    await authorize(context, session, action="trip.read", resource="execution", request=request)
     assert user.id is not None, "get_current_user must always return a persisted user"
     runs_with_details = await repository.list_execution_runs_for_user(session, user.id)
     return GlobalExecutionPanelOut(
