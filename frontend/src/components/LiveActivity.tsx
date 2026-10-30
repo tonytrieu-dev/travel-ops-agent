@@ -16,16 +16,17 @@ function labelFor(name: string): string {
   return STEP_LABELS[name] ?? name
 }
 
-// Always polling once a trip exists (not just while a run is active) so this reads as a live
-// activity log, not a banner that vanishes between runs.
 export function LiveActivity({ tripId, isRunActive }: LiveActivityProps) {
   const fetcher = useMemo(() => () => getTripExecution(tripId), [tripId])
   const { data: panelData } = usePolledResource({
     fetcher,
     isRunActive,
+    resourceKey: `trip-execution:${tripId}`,
     errorText: "Could not load execution data.",
   })
-  const [clearedBeforeSeq, setClearedBeforeSeq] = useState(0)
+  const [cleared, setCleared] = useState<{ tripId: number; beforeSeq: number } | null>(null)
+  // The cutoff only applies to the trip it was set for, so switching trips doesn't hide the new one.
+  const clearedBeforeSeq = cleared?.tripId === tripId ? cleared.beforeSeq : 0
 
   const events = (panelData?.events ?? []).filter((event) => event.seq > clearedBeforeSeq)
   const recent = [...events].reverse()
@@ -55,7 +56,7 @@ export function LiveActivity({ tripId, isRunActive }: LiveActivityProps) {
         {recent.length > 0 && (
           <button
             type="button"
-            onClick={() => setClearedBeforeSeq(maxSeq)}
+            onClick={() => setCleared({ tripId, beforeSeq: maxSeq })}
             className="text-xs font-medium text-slate-400 transition hover:text-slate-600"
           >
             Clear

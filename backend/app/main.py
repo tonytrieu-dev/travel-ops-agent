@@ -5,6 +5,8 @@ handler can stay thin and no stack trace or internal ever leaks to the client.
 """
 
 from collections.abc import AsyncIterator
+import asyncio
+from contextlib import suppress
 from contextlib import asynccontextmanager
 import logging
 from uuid import uuid4
@@ -15,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import get_settings
+from app.compliance_monitoring import monitor_security_controls
 from app.dbos_runtime import launch_dbos, shutdown_dbos
 from app.rate_limit import RateLimitError
 from app.repositories.booking_repository import BookingError
@@ -31,8 +34,14 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     launch_dbos()
-    yield
-    shutdown_dbos()
+    monitoring_task = asyncio.create_task(monitor_security_controls())
+    try:
+        yield
+    finally:
+        monitoring_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await monitoring_task
+        shutdown_dbos()
 
 
 def create_app() -> FastAPI:

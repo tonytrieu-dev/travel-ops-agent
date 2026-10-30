@@ -104,6 +104,12 @@ class SecurityEvent(SQLModel, table=True):
     decision: str = Field(index=True)
     reason: str
     correlation_id: str = Field(index=True)
+    policy_version: str | None = None
+    enforcement_active: bool | None = None
+    actor_role: str | None = None
+    mfa_required: bool | None = None
+    mfa_verified: bool | None = None
+    related_event_ids: list[int] | None = Field(default=None, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utcnow)
 
 
@@ -111,11 +117,16 @@ class SecurityIncident(SQLModel, table=True):
     __tablename__ = "security_incident"
     __table_args__ = (
         Index(
-            "uq_security_incident_open_tenant_device",
-            "tenant_id",
-            "device_id",
+            "uq_security_incident_open_session",
+            "tenant_id", "device_id", "session_id",
             unique=True,
-            postgresql_where=text("status = 'open'"),
+            postgresql_where=text("status = 'open' AND session_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_security_incident_open_sessionless",
+            "tenant_id", "device_id",
+            unique=True,
+            postgresql_where=text("status = 'open' AND session_id IS NULL"),
         ),
     )
 
@@ -126,7 +137,20 @@ class SecurityIncident(SQLModel, table=True):
     session_id: str | None = Field(default=None, index=True)
     reason: str
     status: str = Field(default="open", index=True)
+    trigger_event_id: int | None = Field(default=None, foreign_key="security_event.id")
     created_at: datetime = Field(default_factory=utcnow)
+
+
+class ComplianceAssessment(SQLModel, table=True):
+    __tablename__ = "compliance_assessment"
+
+    id: int | None = Field(default=None, primary_key=True)
+    tenant_id: str = Field(index=True)
+    evaluator_version: str
+    window_start: datetime
+    window_end: datetime
+    assessed_at: datetime = Field(default_factory=utcnow)
+    results: list[dict[str, Any]] = Field(sa_column=Column(JSON))
 
 
 class TripRequest(SQLModel, table=True):
@@ -165,14 +189,12 @@ class FlightSearchResult(SQLModel, table=True):
 
 class Itinerary(SQLModel, table=True):
     __tablename__ = "itinerary"
-    # One itinerary per trip: the DB blocks a concurrent second generation from burning a second
-    # LLM run.
+    # One itinerary per trip. This blocks a duplicate row, not a second LLM run — planning is
+    # serialized by an advisory lock in get_or_create_itinerary.
     __table_args__ = (UniqueConstraint("trip_request_id", name="uq_itinerary_trip_request"),)
 
     id: int | None = Field(default=None, primary_key=True)
     trip_request_id: int = Field(foreign_key="trip_request.id", index=True)
-    # days: list of {day_number, summary, activities: [{name, description, intensity,
-    # source_url}]} — every activity carries the Tavily source_url that grounds it.
     days: list[dict[str, Any]] = Field(sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utcnow)
 

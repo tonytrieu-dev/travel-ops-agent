@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
-from app.config import BOOKING_TTL_MINUTES
+from app.config import BOOKING_TTL_MINUTES, FLIGHT_CACHE_TTL_MINUTES
 from app.models import (
     BookingTransition,
     FlightSearchResult,
@@ -85,7 +85,10 @@ def _record_transition(
 
 async def _lock_booking(session: AsyncSession, log_id: int) -> HITLBookingLog | None:
     result = await session.execute(
-        select(HITLBookingLog).where(col(HITLBookingLog.id) == log_id).with_for_update()
+        select(HITLBookingLog)
+        .where(col(HITLBookingLog.id) == log_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     return result.scalar_one_or_none()
 
@@ -114,11 +117,19 @@ async def request_booking(
     if existing is not None:
         return existing
 
+    if flight.created_at < utcnow() - timedelta(minutes=FLIGHT_CACHE_TTL_MINUTES):
+        raise BookingError(
+            ErrorCode.BOOKING_EXPIRED,
+            409,
+            f"This fare was quoted at {flight.created_at:%Y-%m-%dT%H:%MZ}; "
+            "search again for current prices before requesting a booking.",
+        )
+
     booking = HITLBookingLog(
         trip_request_id=trip_id,
         flight_search_result_id=flight_search_result_id,
         requested_by_user_id=trip.user_id,
-        expires_at=utcnow() + timedelta(minutes=BOOKING_TTL_MINUTES),
+        expires_at=flight.created_at + timedelta(minutes=BOOKING_TTL_MINUTES),
     )
     session.add(booking)
     try:

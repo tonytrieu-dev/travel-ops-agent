@@ -9,8 +9,6 @@ interface ExecutionPanelProps {
   isRunActive: boolean
 }
 
-const NO_RUNS: AgentRunOut[] = []
-
 function tripLabel(trip: TripRequestOut): string {
   return `${trip.origin} → ${trip.destination_airport}`
 }
@@ -174,9 +172,10 @@ export function ExecutionPanel({ trips, isRunActive }: ExecutionPanelProps) {
   const { data, errorMessage } = usePolledResource<AgentRunOut[]>({
     fetcher,
     isRunActive,
+    resourceKey: "execution-history",
     errorText: "Could not load execution data.",
   })
-  const allRuns = data ?? NO_RUNS
+  const allRuns = useMemo(() => data ?? [], [data])
   const [routeSearch, setRouteSearch] = useState("")
   const [statusFilter, setStatusFilter] = useState("all")
 

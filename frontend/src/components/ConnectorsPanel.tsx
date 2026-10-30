@@ -1,17 +1,19 @@
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { ApiError, getConnectors, setSlackConnectorEnabled } from "../api/client"
 import type { ConnectorsOut } from "../api/types"
+import { usePolledResource } from "../hooks/usePolledResource"
 
 export function ConnectorsPanel() {
-  const [connectors, setConnectors] = useState<ConnectorsOut | null>(null)
+  const { data, errorMessage: loadError } = usePolledResource({
+    fetcher: getConnectors,
+    isRunActive: false,
+    resourceKey: "connectors",
+    errorText: "Could not load connector status.",
+  })
+  const [updatedConnectors, setConnectors] = useState<ConnectorsOut | null>(null)
+  const connectors = updatedConnectors ?? data
   const [isToggling, setIsToggling] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
-
-  useEffect(() => {
-    getConnectors()
-      .then(setConnectors)
-      .catch(() => setErrorMessage("Could not load connector status."))
-  }, [])
 
   const handleToggle = async () => {
     if (!connectors) return
@@ -28,6 +30,7 @@ export function ConnectorsPanel() {
   }
 
   if (!connectors) {
+    if (loadError) return <p role="alert" className="text-sm text-red-600">{loadError}</p>
     return (
       <p className="rounded-xl border border-dashed border-slate-300 bg-white p-6 text-sm text-slate-500">
         Loading connectors…

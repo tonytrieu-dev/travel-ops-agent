@@ -12,13 +12,6 @@ from app.rate_limit import _enforce_rate_limit, _request_timestamps
 from tests.db_helpers import run_db, seed_trip
 
 
-@pytest.fixture(autouse=True)
-def _clear_rate_limits():
-    _request_timestamps.clear()
-    yield
-    _request_timestamps.clear()
-
-
 def test_flights_search_is_rate_limited_after_max_requests_from_one_client(client) -> None:
     trip_id = run_db(lambda session: seed_trip(session))
     url = f"/api/trips/{trip_id}/flights/search"
@@ -42,7 +35,7 @@ def test_flights_search_is_rate_limited_after_max_requests_from_one_client(clien
 
 
 @pytest.mark.no_database
-async def test_repeated_login_failures_are_rate_limited_by_client_and_normalized_email(
+async def test_repeated_login_failures_are_rate_limited_by_normalized_email_across_clients(
     monkeypatch,
 ) -> None:
     session = MagicMock()
@@ -53,20 +46,19 @@ async def test_repeated_login_failures_are_rate_limited_by_client_and_normalized
 
     app.dependency_overrides[get_session] = _session_override
     monkeypatch.setattr("app.security_identity.record_authentication_failure", AsyncMock())
-    transport = httpx.ASGITransport(app=app)
     try:
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            responses = [
-                await client.post(
+        responses = []
+        for index in range(RATE_LIMIT_MAX_REQUESTS + 1):
+            transport = httpx.ASGITransport(app=app, client=(f"192.0.2.{index + 1}", 12345))
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                responses.append(await client.post(
                     "/api/auth/login",
                     json={
                         "email": "TARGET@EXAMPLE.TEST" if index % 2 else "target@example.test",
                         "password": "wrong",
                         "device_id": "guessed-device",
                     },
-                )
-                for index in range(RATE_LIMIT_MAX_REQUESTS + 1)
-            ]
+                ))
     finally:
         app.dependency_overrides.clear()
 
@@ -132,6 +124,7 @@ async def test_login_rejects_oversized_email_before_database_access(monkeypatch)
         app.dependency_overrides.clear()
 
     assert response.status_code == 422
+    session.scalar.assert_not_called()
 
 
 @pytest.mark.no_database

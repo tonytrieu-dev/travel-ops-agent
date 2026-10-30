@@ -3,6 +3,28 @@
 
 export type FitnessLevel = "low" | "moderate" | "high"
 
+export interface ControlResultOut {
+  control: string
+  status: "pass" | "fail" | "insufficient_evidence"
+  summary: string
+  evidence_event_ids: number[]
+  details: Record<string, unknown>
+}
+
+export interface ComplianceAssessmentOut {
+  id: number
+  evaluator_version: string
+  window_start: string
+  window_end: string
+  assessed_at: string
+  results: ControlResultOut[]
+}
+
+export interface ComplianceMonitoringOut {
+  stale: boolean
+  assessments: ComplianceAssessmentOut[]
+}
+
 export type TripStatus = "created" | "flights_searched" | "itinerary_ready"
 
 export type BookingState =

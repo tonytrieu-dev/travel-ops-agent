@@ -18,7 +18,6 @@ from app.config import (
 )
 from app.db import get_session
 from app.dbos_runtime import run_planner_durable
-from app.dependencies import get_current_user
 from app.models import AgentRun, AgentRunStep, ExecutionEvent, TripRequest, User
 from app.rate_limit import enforce_request_rate_limit
 from app.repositories import trips_repository as repository
@@ -44,7 +43,7 @@ from app.schemas import (
     TripSnapshotOut,
 )
 from app.services.flight_search import FlightSearchService, flight_provider_name
-from app.security_admission import admit_trip_route, authorize_route
+from app.security_admission import admit_collection_route, admit_trip_route
 from app.security_segment import enforce_api_segment
 from app.request_context import correlation_id
 
@@ -70,14 +69,13 @@ _NOT_FOUND_OR_RATE_LIMITED: dict[int | str, dict[str, Any]] = {
     "/trips",
     response_model=TripRequestOut,
     responses=_VALIDATION,
-    dependencies=[Depends(authorize_route("trip.create", "trip"))],
 )
 async def create_trip(
     body: TripRequestCreate,
     session: AsyncSession = Depends(get_session),
-    user: User = Depends(get_current_user),
+    user: User = Depends(admit_collection_route("trip.create", "trip")),
 ) -> TripRequestOut:
-    assert user.id is not None, "get_current_user must always return a persisted user"
+    assert user.id is not None, "admit_collection_route always returns a persisted user"
     trip = await repository.create_trip(session, user.id, body)
     return TripRequestOut.model_validate(trip)
 
@@ -85,13 +83,12 @@ async def create_trip(
 @router.get(
     "/trips",
     response_model=list[TripRequestOut],
-    dependencies=[Depends(authorize_route("trip.read", "trips"))],
 )
 async def list_trips(
     session: AsyncSession = Depends(get_session),
-    user: User = Depends(get_current_user),
+    user: User = Depends(admit_collection_route("trip.read", "trips")),
 ) -> list[TripRequestOut]:
-    assert user.id is not None, "get_current_user must always return a persisted user"
+    assert user.id is not None, "admit_collection_route always returns a persisted user"
     trips = await repository.list_trips(session, user.id)
     return [TripRequestOut.model_validate(trip) for trip in trips]
 
@@ -250,13 +247,12 @@ async def get_trip_execution(
     "/execution",
     response_model=GlobalExecutionPanelOut,
     responses={403: {"model": ProblemDetail}},
-    dependencies=[Depends(authorize_route("trip.read", "execution"))],
 )
 async def get_all_execution(
     session: AsyncSession = Depends(get_session),
-    user: User = Depends(get_current_user),
+    user: User = Depends(admit_collection_route("trip.read", "execution")),
 ) -> GlobalExecutionPanelOut:
-    assert user.id is not None, "get_current_user must always return a persisted user"
+    assert user.id is not None, "admit_collection_route always returns a persisted user"
     runs_with_details = await repository.list_execution_runs_for_user(session, user.id)
     return GlobalExecutionPanelOut(
         agent_runs=[

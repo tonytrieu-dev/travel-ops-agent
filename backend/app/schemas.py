@@ -406,6 +406,12 @@ class SecurityEventOut(BaseModel):
     reason: str
     correlation_id: str
     created_at: UtcDatetime
+    policy_version: str | None
+    enforcement_active: bool | None
+    actor_role: str | None
+    mfa_required: bool | None
+    mfa_verified: bool | None
+    related_event_ids: list[int] | None
 
 
 class SecurityIncidentOut(BaseModel):
@@ -419,6 +425,7 @@ class SecurityIncidentOut(BaseModel):
     reason: str
     status: str
     created_at: UtcDatetime
+    trigger_event_id: int | None
 
 
 class SecurityEventQuery(BaseModel):
@@ -426,3 +433,27 @@ class SecurityEventQuery(BaseModel):
     decision: Literal["allow", "deny"] | None = None
     action: str | None = None
     since: datetime | None = None
+
+
+class ControlResultOut(BaseModel):
+    control: str
+    status: Literal["pass", "fail", "insufficient_evidence"]
+    summary: str
+    evidence_event_ids: list[int] = Field(default_factory=list)
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class ComplianceAssessmentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    evaluator_version: str
+    window_start: UtcDatetime
+    window_end: UtcDatetime
+    assessed_at: UtcDatetime
+    results: list[ControlResultOut]
+
+
+class ComplianceMonitoringOut(BaseModel):
+    stale: bool
+    assessments: list[ComplianceAssessmentOut]

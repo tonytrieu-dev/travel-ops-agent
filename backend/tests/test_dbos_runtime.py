@@ -8,12 +8,18 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlmodel import col
 
 from app.agent.planner import agent
+from app import dbos_runtime
 from app.dbos_runtime import run_planner_durable
-from app.models import AgentRun, AgentRunStep
+from app.models import AgentRun, AgentRunStep, AgentStepKind
 from tests.db_helpers import TEST_DATABASE_URL, seed_trip
 
+# Captured before the client fixture patches the module attribute with the planner spy; this test
+# needs the genuine durable workflow so the FunctionModel's failure actually propagates.
+_REAL_RUN_PLANNER_WORKFLOW = dbos_runtime._run_planner_workflow
 
-async def test_planner_failure_preserves_completed_exchanges(client) -> None:
+
+async def test_planner_failure_preserves_completed_exchanges(client, monkeypatch) -> None:
+    monkeypatch.setattr(dbos_runtime, "_run_planner_workflow", _REAL_RUN_PLANNER_WORKFLOW)
     engine = create_async_engine(TEST_DATABASE_URL)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     requests = 0
@@ -43,5 +49,8 @@ async def test_planner_failure_preserves_completed_exchanges(client) -> None:
                 select(AgentRunStep).where(col(AgentRunStep.agent_run_id) == runs[0].id)
             ))
             assert len(steps) == 1, "the completed exchange must survive the later provider failure"
+            assert steps[0].kind == AgentStepKind.MODEL
+            assert steps[0].status == "completed"
+            assert steps[0].output_summary == "thinking"
     finally:
         await engine.dispose()

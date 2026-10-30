@@ -1,24 +1,23 @@
 # TravelOps Agent
 
-An AI travel-planning application that searches flight data, researches destination activities,
-and generates an age- and fitness-aware itinerary. Required trip fields are validated at intake,
-while ambiguous values can produce a clarifying question instead of an itinerary. A
-**human-in-the-loop** state machine keeps booking handoff outside the agent: the model can research
-and propose flights, but it has no tool that can approve or execute booking state changes.
+A bounded **zero-trust application prototype**, using a stateful travel planner as
+the protected resource. It demonstrates user/session verification, role and tenant
+access policy, privileged MFA, recorded security decisions, and automatic session
+containment. It is a first implementation toward the enterprise-network project
+objective; device authentication and network micro-segmentation remain gaps.
 
-> A small reference system for durable AI workflows: the planner is observable and replay-safe,
-> booking requires an explicit human decision, and every decision is persisted as an audit trail.
+The planner searches flights and destination activities and proposes an itinerary.
+Booking approval and execution stay outside the model's tools, behind application
+policy and a human-approval state machine. The system returns checkout links;
+it does not purchase flights.
 
-## Zero-trust enterprise network extension
+The [architecture findings](docs/ZERO_TRUST_FINDINGS.md) preserve the baseline,
+before/after evidence, design limits and three-scenario security demonstration.
 
-TravelOps also provides a runnable zero-trust architecture demonstration. Protected API routes
-require a short-lived, server-backed session bound to identity, tenant, role, a device identifier, and MFA when
-zero-trust enforcement is enabled. Tenant ownership and reusable policy checks protect resources;
-security events are append-only and incidents are persisted for review.
-Repeated denials revoke the affected session.
+## Zero-trust architecture
 
 Zero-trust enforcement is **on by default** — every protected API route requires a short-lived
-bearer token, with no toggle to flip first. The classroom issuer uses custom HMAC-signed tokens,
+bearer token, with no toggle to flip first. The local issuer uses custom HMAC-signed tokens,
 passwords, and TOTP; it does not implement OIDC discovery or standard OIDC token validation.
 With no `ZERO_TRUST_SIGNING_SECRET` set, the app generates a fresh per-process signing key; set an explicit secret
 for a deployment whose tokens must survive a restart. Production should put Keycloak or another
@@ -42,6 +41,9 @@ network segmentation or workload authentication. See the [trust boundaries](docs
 ## Start here
 
 - [Architecture](#architecture) — the system boundary and critical request path.
+- [Zero Trust control plane](docs/ARCHITECTURE.md#zero-trust-enterprise-network-overlay) — how the
+  five required areas (identity and access management, MFA, segmentation, continuous monitoring,
+  incident response) map to concrete controls, and what is deliberately out of scope.
 - [Evaluation results](#evaluation-results) — 84/84 deterministic assertions passed in a 12-run
   sample; the optional quality judge passed 11/12.
 - [Zero-trust demo](#zero-trust-demo) — deterministic identities, MFA, attacks, containment, and
@@ -60,44 +62,72 @@ independent security audit.
 ```bash
 docker compose up -d postgres
 cp .env.example .env
+# Set DATABASE_URL in .env to match the Docker service:
+# postgresql+asyncpg://travel_agent:travel_agent@localhost:5432/travel_agent
 # Enforcement is already on by default; optionally set ZERO_TRUST_SIGNING_SECRET for stable tokens.
 cd backend
 uv run alembic upgrade head
 uv run python -m scripts.seed_security_demo
+uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Keep that API terminal running. In a second terminal from the repository root:
+
+```bash
+cd backend
 uv run python -m scripts.security_demo
 ```
+
+For an existing account left with an empty password hash by the security migration,
+run `uv run python -m scripts.enroll_identity --email <existing-account-email>` from
+`backend`. A trusted local database operator must run this command. It prompts for
+and confirms a chosen password without placing it in command arguments. It refuses
+unknown, disabled, or already-enrolled accounts and preserves identity, trip ownership,
+device and MFA settings. It is enrollment, not a password-reset endpoint. Existing
+MFA enrollment must still be available to the owner; the migration's shared demo
+TOTP secret is suitable only for local synthetic accounts.
+
+The [architecture findings and mini use case](docs/ZERO_TRUST_FINDINGS.md) preserve
+the baseline, implemented changes, before/after evidence, and outstanding review issues.
 
 The synthetic accounts all use `demo-password` and the TOTP secret
 `JBSWY3DPEHPK3PXP` (the script calculates the current six-digit code). The demo shows a valid
 tenant-scoped request, MFA-gated operator access, token/session rejection,
 browser segment spoof rejection, denials triggering session revocation, and the
-security-operations event/incident query. These are classroom credentials; never reuse them.
+security-operations event/incident query. These are throwaway demo credentials; never reuse them.
 
 For the repeatable PostgreSQL demonstration, including authorized booking, cross-tenant denial,
-tampered tokens, revocation, and preserved workflow/audit behavior after provider failure, follow
+tampered tokens, revocation, and completed planner exchanges retained after a later model failure, follow
 the [evaluation commands](docs/SECURITY_EVALUATION.md). That harness uses isolated test data and
 stubbed external providers; it does not purchase flights or consume model/search quota.
+Booking-options provider-failure preservation has no regression test and is not a validated guarantee.
 
-## Three-minute walkthrough
+## Security demonstration
 
-This is the shortest useful demo for a reviewer. It shows agent research, persisted execution,
-human approval, and audit history in one path.
+Use three scenarios to show the bounded prototype:
 
-1. Enter `JFK` → `San Diego`, `2026-09-01` → `2026-09-08`, age `78`, fitness `low`. Create the
-   trip and click **Plan itinerary**.
-2. Open **Agent execution** while it runs. Show the two read-only tools (`search_flights` and
-   `web_search`), live events, persisted run status, tool results, token usage, and structured
-   output. The low-fitness case cannot contain a `high`-intensity activity.
-3. Select a flight and click **Review booking**. Pause at **Approve this flight**: the agent can
-   propose, but it has no tool that can mutate booking state. Click approval, then **Continue to
-   airline**. The app retrieves checkout links; it does not purchase or hold a fare.
-4. Open **Approval history**. Show the transition, actor email, reason, and timestamp read from
-   the append-only database trail.
-5. For recovery, stop the backend during planning and restart it. DBOS resumes from Postgres
-   checkpoints; completed Cerebras, flight, and activity steps are reused rather than re-issued.
+1. **Legitimate access:** a traveler completes MFA and reads an owned trip. A
+   password-only session cannot approve a booking.
+2. **Unauthorized access and containment:** a tenant-A traveler attempts to read
+   tenant B's booking. Five denied reads trigger session revocation; the next
+   protected request with that token returns 401.
+3. **Operator evidence:** an MFA-verified operator inspects the linked incident
+   and assessment evidence. Show pass, fail and insufficient evidence honestly;
+   a database-owner application role should fail the audit-protection assessment.
 
-For a repeatable demo, use the recorded flight and activity providers where possible. The LLM
-call remains live.
+The [findings document](docs/ZERO_TRUST_FINDINGS.md#presentation-scope-and-three-scenario-demonstration)
+maps these scenarios to actual tests and explains the before/after design. With
+an isolated PostgreSQL test database prepared as described in
+[Security evaluation](docs/SECURITY_EVALUATION.md#repeat-the-validation), run from `backend`:
+
+```bash
+uv run pytest -q tests/test_security_integration.py tests/test_compliance.py
+```
+
+These tests use synthetic accounts and stub external providers. They do not
+purchase flights or spend model/search quota. The standalone HTTP script above
+is a smaller missing-resource walkthrough; it does not cover the full
+cross-tenant assessment scenario. Browser rehearsal remains separate work.
 
 ## Architecture
 
@@ -201,6 +231,9 @@ The detailed implementation notes remain in [ARCHITECTURE.md](docs/ARCHITECTURE.
 [EVALS.md](docs/EVALS.md), and [DECISIONS.md](docs/DECISIONS.md).
 
 ## Project status and limitations
+
+Security monitoring now includes recurring MFA, audit-protection, and session-containment checks.
+See [implementation, findings, and demonstration steps](docs/COMPLIANCE_MONITORING.md).
 
 This is a portfolio and reference implementation intended for local development and evaluation.
 It is not a production travel service; testing includes only modest local load, with no independent

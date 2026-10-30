@@ -11,7 +11,7 @@ from collections.abc import Awaitable, Callable
 from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import config
+from app import security_posture as posture
 from app.db import get_session
 from app.dependencies import get_security_context
 from app.models import HITLBookingLog, TripRequest, User
@@ -51,7 +51,7 @@ class SecurityError(Exception):
 def _authorization_reason(
     context: SecurityContext, action: str, require_mfa: bool
 ) -> str:
-    if not config.get_settings().zero_trust_enforced:
+    if not posture.enforcement_active():
         return "development security enforcement disabled"
     if action not in _ROLE_ACTIONS.get(context.role, set()):
         return "role is not allowed to perform action"
@@ -73,7 +73,7 @@ async def authorize(
     decision = "allow" if reason in _ALLOW_REASONS else "deny"
     await record_security_event(
         session, context, action=action, resource=resource, decision=decision,
-        reason=reason, request=request,
+        reason=reason, request=request, mfa_required=require_mfa,
     )
     if decision == "deny":
         raise SecurityError(reason)
@@ -93,19 +93,21 @@ async def _admit(
 ) -> None:
     if not exists:
         reason = "resource does not exist or is not visible"
-    elif config.get_settings().zero_trust_enforced and not owned:
+    elif posture.enforcement_active() and not owned:
         reason = "tenant or owner mismatch"
     else:
         reason = _authorization_reason(context, action, require_mfa)
     if reason not in _ALLOW_REASONS:
         await record_security_event(
-            session, context, action=action, resource=resource, decision="deny", reason=reason, request=request
+            session, context, action=action, resource=resource, decision="deny", reason=reason, request=request,
+            mfa_required=require_mfa,
         )
         if not exists or not owned:
             raise not_found
         raise SecurityError(reason)
     await record_security_event(
-        session, context, action=action, resource=resource, decision="allow", reason=reason, request=request
+        session, context, action=action, resource=resource, decision="allow", reason=reason, request=request,
+        mfa_required=require_mfa,
     )
 
 
@@ -211,5 +213,27 @@ def authorize_route(
             context, session, action=action, resource=resource,
             request=request, require_mfa=require_mfa,
         )
+
+    return dependency
+
+
+def admit_collection_route(
+    action: str, resource: str, *, require_mfa: bool = False
+) -> Callable[..., Awaitable[User]]:
+    """One seam for collection routes (create/list, no path id): authorize the action and return
+    the authenticated owner in a single dependency, so handlers never reach for a second identity
+    door. The returned principal's id scopes the owner-filtered repository query."""
+    async def dependency(
+        request: Request,
+        session: AsyncSession = Depends(get_session),
+        context: SecurityContext = Depends(get_security_context),
+    ) -> User:
+        await authorize(
+            context, session, action=action, resource=resource,
+            request=request, require_mfa=require_mfa,
+        )
+        owner = await session.get(User, context.user_id)
+        assert owner is not None, "authorized context always references a persisted user"
+        return owner
 
     return dependency

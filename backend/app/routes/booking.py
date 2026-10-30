@@ -14,7 +14,6 @@ from app.adapters.slack_hitl import notify_pending_approval, slack_notifications
 from app import config
 from app.db import get_session
 from app.dbos_runtime import execute_booking_durable
-from app.dependencies import get_current_user
 from app.models import (
     BookingTransition,
     FlightSearchResult,
@@ -23,7 +22,11 @@ from app.models import (
     User,
 )
 from app.repositories import booking_repository as repository
-from app.security_admission import admit_booking_route, admit_trip_route, authorize_route
+from app.security_admission import (
+    admit_booking_route,
+    admit_collection_route,
+    admit_trip_route,
+)
 from app.security_segment import enforce_api_segment
 from app.request_context import correlation_id
 from app.schemas import (
@@ -107,15 +110,14 @@ async def _notify_slack_if_enabled(session: AsyncSession, booking: HITLBookingLo
 @router.get(
     "/bookings",
     response_model=list[BookingLogOut],
-    dependencies=[Depends(authorize_route("trip.read", "bookings"))],
 )
 async def list_bookings(
     session: AsyncSession = Depends(get_session),
-    user: User = Depends(get_current_user),
+    user: User = Depends(admit_collection_route("trip.read", "bookings")),
 ) -> list[BookingLogOut]:
     """Backs the global approval-history tab: every booking this user requested, each with its
     append-only transition trail."""
-    assert user.id is not None, "get_current_user must always return a persisted user"
+    assert user.id is not None, "admit_collection_route always returns a persisted user"
     bookings = await repository.list_bookings_with_transitions_for_user(session, user.id)
     every_transition = [transition for _, transitions in bookings for transition in transitions]
     actor_emails = await repository.actor_emails_for(session, every_transition)

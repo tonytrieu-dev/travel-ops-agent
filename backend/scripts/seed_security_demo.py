@@ -1,17 +1,13 @@
 """Seed synthetic identities for the zero-trust walkthrough."""
 
 import asyncio
-import hashlib
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import get_settings
 from app.models import User
-
-
-def password_hash(password: str) -> str:
-    return hashlib.pbkdf2_hmac("sha256", password.encode(), b"travelops-demo", 120_000).hex()
+from app.security_identity import password_hash
 
 
 async def main() -> None:

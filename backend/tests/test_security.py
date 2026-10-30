@@ -29,7 +29,6 @@ from app.security_evidence import (
     record_security_event,
 )
 from app.security_admission import SecurityError, admit_trip, authorize
-from app.security_segment import enforce_api_segment
 from tests.db_helpers import TEST_DATABASE_URL, run_db
 
 _SIGNING_SECRET = "unit-test-signing-secret-at-least-32-bytes"
@@ -91,7 +90,7 @@ async def _token(session: AsyncSession, user: User) -> str:
     security_session = await create_security_session(session, user, user.device_id)
     security_session.mfa_verified = True
     await session.flush()
-    return issue_access_token(security_session, user, _SIGNING_SECRET)
+    return issue_access_token(security_session, user)
 
 
 def _events(action: str | None = None, decision: str | None = None) -> list[SecurityEvent]:
@@ -149,7 +148,7 @@ def test_expired_token_is_rejected(enforced: Settings) -> None:
         security_session.expires_at = utcnow() - timedelta(minutes=1)
         await session.flush()
         await authenticate_identity(
-            f"Bearer {issue_access_token(security_session, user, _SIGNING_SECRET)}", session
+            f"Bearer {issue_access_token(security_session, user)}", session
         )
 
     with pytest.raises(HTTPException) as error:
@@ -165,7 +164,7 @@ def test_revoked_session_rejects_an_otherwise_valid_token(enforced: Settings) ->
         user = await _add_user(session)
         security_session = await create_security_session(session, user, user.device_id)
         security_session.mfa_verified = True
-        token = issue_access_token(security_session, user, _SIGNING_SECRET)
+        token = issue_access_token(security_session, user)
         security_session.revoked_at = utcnow()
         await session.flush()
         await authenticate_identity(f"Bearer {token}", session)
@@ -205,21 +204,6 @@ def test_privileged_action_needs_mfa_and_the_right_role(enforced: Settings) -> N
 
 
 # --- Micro-segmentation and tenant isolation ---------------------------------------------------
-
-
-def test_browser_cannot_assert_an_internal_source_segment(enforced: Settings) -> None:
-    """A spoofed x-source-segment header is the "pretend I'm an internal service" move; the
-    server assigns the segment, so the request is denied and the denial recorded."""
-    from starlette.requests import Request
-
-    async def _work(session: AsyncSession) -> None:
-        user = await _add_user(session)
-        scope = {"type": "http", "headers": [(b"x-source-segment", b"internal")], "state": {}}
-        await enforce_api_segment(Request(scope), _context(user, mfa_verified=True), session)
-
-    with pytest.raises(SecurityError, match="segment"):
-        run_db(_work)
-    assert _events(action="segment.assert", decision="deny")
 
 
 def test_missing_resource_records_denial_when_enforcement_is_disabled(

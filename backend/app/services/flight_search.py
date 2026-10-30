@@ -109,6 +109,7 @@ class FlightSearchService:
                         arrive_at=source_offer.arrive_at, stops=source_offer.stops,
                         booking_token=source_offer.booking_token, raw_offer=source_offer.raw_offer,
                         source=FlightResultSource.CACHED,
+                        created_at=source_offer.created_at,
                     )
                     for source_offer in cross_trip_offers
                 ]

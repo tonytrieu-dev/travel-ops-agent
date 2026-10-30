@@ -25,9 +25,11 @@ from app.models import FlightSearchResult, TripRequest
 from app.rate_limit import acquire_agent_run_slot, release_agent_run_slot
 from app.request_context import bind_correlation_id, correlation_id
 from app.repositories import booking_repository as repository
+from app.repositories import trips_repository
 from app.schemas import (
     BookingLogOut,
     ClarificationOut,
+    ItineraryOut,
     PlannerOutput,
     PlanTooComplexOut,
 )
@@ -176,6 +178,11 @@ async def run_planner_durable(trip_id: int, prompt: str, trace_id: str | None = 
     the durable call from the outside instead."""
     await acquire_agent_run_slot()
     try:
-        return await _run_planner_workflow(trip_id, prompt, trace_id or correlation_id())
+        output = await _run_planner_workflow(trip_id, prompt, trace_id or correlation_id())
     finally:
         release_agent_run_slot()
+    # Persist here, inside the durable call, so a crash after it returns can't lose the itinerary.
+    if isinstance(output, ItineraryOut):
+        async with get_session_factory()() as session:
+            await trips_repository.persist_itinerary_if_current(session, trip_id, prompt, output)
+    return output

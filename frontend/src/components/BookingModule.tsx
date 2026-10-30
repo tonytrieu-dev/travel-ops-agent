@@ -6,6 +6,7 @@ import {
   executeBooking,
   getBooking,
   getConnectors,
+  getAuthConfig,
   requestBooking,
 } from "../api/client"
 import type { BookingLogOut, FlightOfferOut, TripRequestOut } from "../api/types"
@@ -94,10 +95,15 @@ export function BookingModule({ trip, selectedOffer, onSearchAgain }: BookingMod
   }, [bookingLog])
 
   useEffect(() => {
-    getConnectors()
-      .then((connectors) =>
-        setIsSlackApprovalEnabled(connectors.slack.configured && connectors.slack.enabled),
-      )
+    getAuthConfig()
+      .then(async ({ enforced }) => {
+        if (enforced) {
+          setIsSlackApprovalEnabled(false)
+          return
+        }
+        const connectors = await getConnectors()
+        setIsSlackApprovalEnabled(connectors.slack.configured && connectors.slack.enabled)
+      })
       .catch(() => setIsSlackApprovalEnabled(false))
   }, [])
 

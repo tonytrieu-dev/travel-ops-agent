@@ -27,7 +27,7 @@ The application is a small, container-friendly zero-trust API-boundary demonstra
 carries a short-lived signed identity bound to a server-side session and device identifier; the API checks
 tenant, role, MFA, revocation, and resource ownership before admitting it from the web boundary.
 
-The security control plane implements the course's five required areas:
+The security control plane covers the five areas an enterprise zero-trust model has to address:
 
 - **Identity and access management:** tenant, role, device, and disabled-identity attributes are
   persisted and checked server-side.
@@ -54,6 +54,40 @@ boundary is implemented. A bearer-token holder can replay the token from another
 authorization as explicit decisions and does not grant trust merely from network location or
 asset ownership. This demo illustrates selected application controls; production device and
 network controls, an enterprise IdP, and independent security assessment remain outside its scope.
+
+### Where the trust boundary stops: the agent loop
+
+Zero-trust verification happens at two places: the HTTP edge (every protected route) and the
+booking state machine (every transition). It does **not** continue inside the planner's tool loop.
+When a `/plan` request is admitted, it crosses into the durable workflow as three serializable
+values — `trip_id`, `prompt`, `trace_id` — and the verified `SecurityContext` is left at the edge.
+`PlannerDeps` carries the flight and activity providers and the traveler's fitness level, not an
+identity. So the model's tool calls run with the harness's ambient authority, not the caller's:
+there is no per-tool-call re-authorization, and no tenant/role check inside the loop.
+
+That is a deliberate posture, not an oversight. The loop is safe because the agent is kept
+powerless, not because it is continuously verified. Two design choices hold that line: the agent
+has only read-only tools (`search_flights`, `web_search`, both reaching external providers with
+the trip's own parameters), and the one operation that mutates state and crosses an identity
+boundary — booking — is not an agent tool at all. It lives behind the REST state machine, where
+each transition is re-verified by `admit_booking_route(..., require_mfa=True)`. The dangerous
+capability sits outside the loop, so the loop has nothing worth attacking.
+
+The consequence is explicit: the agent loop is a least-privilege sandbox bounded by *capability*,
+not a continuously-verified zero-trust zone. This equivalence depends on the tool set staying
+read-only. The day the agent gains a tool that writes state or reads another tenant's data, the
+boundary has to move inward — the `SecurityContext` must be threaded into `PlannerDeps` and each
+tool call re-authorized against the caller — or that tool must stay outside the loop behind its
+own admission check, the way booking does. Adding per-tool-call authorization today, for two
+read-only tools, would guard a blast radius that does not exist.
+
+### Why the harness exists
+
+The durable workflow around the loop is a reliability layer, not a trust layer. It earns its place
+through crash recovery (DBOS replays checkpointed Cerebras, flight, and activity steps from
+Postgres instead of re-charging the providers), a concurrency slot that bounds simultaneous LLM
+runs against the provider rate limit, and the execution-event trail that records what the agent
+did. None of those are security controls; the security controls are the two boundaries above.
 
 The backend is a single FastAPI process. The frontend is a separate static SPA that talks to it
 over REST; there is no server-rendered coupling between them.

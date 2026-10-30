@@ -19,6 +19,7 @@ from app.config import SLACK_API_TIMEOUT_SECONDS, Settings
 from app.models import ConnectorSetting, FlightSearchResult, HITLBookingLog, TripRequest
 from app.repositories import booking_repository as repository
 from app.repositories.booking_repository import BookingError
+from app import security_posture as posture
 
 logger = logging.getLogger(__name__)
 
@@ -28,9 +29,11 @@ _REJECT_ACTION_ID = "reject_booking"
 
 
 def slack_configured(settings: Settings) -> bool:
-    # shortcut: Slack users are unmapped; add owner/role/MFA checks before enabling enforced approvals.
+    # Legacy dev-only connector: a Slack identity cannot prove the zero-trust claims (tenant,
+    # role, MFA, device) a protected action requires, so it is disabled whenever enforcement —
+    # the primary posture — is on. It is not a path to enforced approvals; in-app approval is.
     return bool(
-        not settings.zero_trust_enforced
+        not posture.enforcement_active()
         and settings.slack_bot_token
         and settings.slack_signing_secret
         and settings.slack_approvals_channel_id

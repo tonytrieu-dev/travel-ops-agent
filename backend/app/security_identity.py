@@ -1,10 +1,8 @@
 """Password, MFA, token, session, and request-principal lifecycle."""
 
 import base64
-import binascii
 import hashlib
 import hmac
-import json
 import time
 from dataclasses import dataclass
 from datetime import UTC, timedelta
@@ -20,6 +18,8 @@ from app import config
 from app.models import SecuritySession, User, utcnow
 from app.schemas import LoginRequest, MfaVerifyRequest, TokenOut
 from app.security_evidence import record_authentication_failure, record_security_event
+from app import security_posture as posture
+from app.security_token_issuer import issue_token, verify_token
 
 
 @dataclass(frozen=True)
@@ -69,29 +69,12 @@ def _context_from_claims(claims: dict[str, object], user: User) -> SecurityConte
     )
 
 
-def _decode_token(token: str, secret: str) -> dict[str, object]:
-    try:
-        payload, signature = token.rsplit(".", 1)
-        expected = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(signature, expected):
-            raise ValueError("invalid signature")
-        claims = json.loads(base64.urlsafe_b64decode(payload + "=="))
-        if not isinstance(claims, dict):
-            raise ValueError("token payload must be an object")
-        return claims
-    except (binascii.Error, UnicodeDecodeError, ValueError, TypeError, json.JSONDecodeError):
-        raise HTTPException(status_code=401, detail="invalid zero-trust access token") from None
-
-
 async def authenticate_identity(
     authorization: str, session: AsyncSession
 ) -> tuple[User, SecurityContext]:
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="bearer token required")
-    claims = _decode_token(
-        authorization.removeprefix("Bearer "),
-        config.get_settings().zero_trust_signing_secret.get_secret_value(),
-    )
+    claims = verify_token(authorization.removeprefix("Bearer "))
     user_id = claims.get("user_id")
     if not isinstance(user_id, int):
         raise HTTPException(status_code=401, detail="invalid user identity")
@@ -170,15 +153,21 @@ async def verify_session_mfa(
     if not hmac.compare_digest(totp_code(user.totp_secret), code):
         return False
     security_session.mfa_verified = True
-    await session.commit()
+    assert user.id is not None
+    await record_security_event(
+        session,
+        SecurityContext(user.tenant_id, user.id, security_session.device_id, user.role, True, security_session.session_id),
+        action="auth.mfa.verify", resource=f"session:{security_session.session_id}",
+        decision="allow", reason="TOTP verified",
+    )
     return True
 
 
 # --- Token issuance: mint a signed bearer token from a session
 
 
-def issue_access_token(security_session: SecuritySession, user: User, secret: str) -> str:
-    payload = {
+def issue_access_token(security_session: SecuritySession, user: User) -> str:
+    payload: dict[str, object] = {
         "user_id": security_session.user_id,
         "tenant_id": security_session.tenant_id,
         "device_id": security_session.device_id,
@@ -188,19 +177,12 @@ def issue_access_token(security_session: SecuritySession, user: User, secret: st
         "expires_at": int(security_session.expires_at.replace(tzinfo=UTC).timestamp()),
         "jti": uuid4().hex,
     }
-    encoded = base64.urlsafe_b64encode(
-        json.dumps(payload, separators=(",", ":")).encode()
-    ).decode().rstrip("=")
-    signature = hmac.new(secret.encode(), encoded.encode(), hashlib.sha256).hexdigest()
-    return f"{encoded}.{signature}"
+    return issue_token(payload)
 
 
 def _token_out(security_session: SecuritySession, user: User, mfa_required: bool) -> TokenOut:
     return TokenOut(
-        access_token=issue_access_token(
-            security_session, user,
-            config.get_settings().zero_trust_signing_secret.get_secret_value(),
-        ),
+        access_token=issue_access_token(security_session, user),
         expires_at=security_session.expires_at.replace(tzinfo=UTC),
         session_id=security_session.session_id,
         mfa_required=mfa_required,
@@ -217,8 +199,8 @@ async def login_identity(
     if user is None or user.disabled or user.device_id != body.device_id or not password_matches(user, body.password):
         await record_authentication_failure(
             reason="invalid credentials", tenant_id=user.tenant_id if user else None,
-            actor_user_id=user.id if user else None,
-            device_id=user.device_id if user else None, request=request,
+            resource=f"user:{user.id}" if user else "identity",
+            request=request,
         )
         raise HTTPException(status_code=401, detail="invalid credentials")
     security_session = await create_security_session(session, user, body.device_id)
@@ -242,7 +224,7 @@ async def verify_identity_mfa(
         raise HTTPException(status_code=401, detail="session expired")
     evidence = {
         "tenant_id": security_session.tenant_id,
-        "actor_user_id": security_session.user_id,
+        "resource": f"user:{security_session.user_id}",
         "device_id": security_session.device_id,
         "session_id": security_session.session_id,
         "request": request,
@@ -260,12 +242,7 @@ async def verify_identity_mfa(
     return _token_out(security_session, user, False)
 
 
-async def resolve_current_user(
-    session: AsyncSession, authorization: str | None, request: Request
-) -> User:
-    if authorization is not None:
-        user, _ = await _authenticated_identity(authorization, session, request)
-        return user
+async def _demo_user(session: AsyncSession) -> User:
     user = await session.scalar(select(User).where(col(User.email) == config.DEMO_USER_EMAIL))
     if user is not None:
         return user
@@ -284,10 +261,10 @@ async def resolve_security_context(
     session: AsyncSession, authorization: str | None, request: Request
 ) -> SecurityContext:
     if authorization is None:
-        if config.get_settings().zero_trust_enforced:
+        if posture.enforcement_active():
             await record_authentication_failure(reason="missing bearer token", request=request)
             raise HTTPException(status_code=401, detail="zero-trust access token required")
-        user = await resolve_current_user(session, None, request)
+        user = await _demo_user(session)
         assert user.id is not None
         return SecurityContext(user.tenant_id, user.id, user.device_id, user.role, True)
     _, context = await _authenticated_identity(authorization, session, request)

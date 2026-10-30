@@ -298,3 +298,95 @@ def test_segment_spoof_header_is_rejected_as_403_through_the_handler(enforced_cl
     assert response.json()["code"] == "forbidden", (
         "SecurityError must surface through the app's ProblemDetail handler, not a bare 500"
     )
+    from tests.test_security import _events
+    denials = _events(action="segment.assert", decision="deny")
+    assert len(denials) == 1
+    assert denials[0].tenant_id == "tenant-a"
+    assert denials[0].device_id == "device-a"
+
+
+@pytest.mark.parametrize(("victim_device", "submitted_device"), [
+    ("victim-device", "attacker-device"), ("victim-device", "victim-device"), ("unknown", "unknown"),
+])
+def test_failed_logins_cannot_poison_victim_containment(enforced_client, victim_device, submitted_device) -> None:
+    _seed_user("victim@example.test", "tenant-a", "traveler", victim_device)
+    token = _sign_in(enforced_client, "victim@example.test", victim_device)
+    headers = {"Authorization": f"Bearer {token}"}
+    for _ in range(4):
+        assert enforced_client.post("/api/auth/login", json={
+            "email": "victim@example.test", "password": "wrong", "device_id": submitted_device,
+        }).status_code == 401
+    assert enforced_client.get("/api/trips/999999", headers=headers).status_code == 404
+    assert enforced_client.get("/api/trips", headers=headers).status_code == 200
+
+
+@pytest.mark.parametrize("failure", ["password", "mfa"])
+def test_failed_authentication_records_target_without_verified_actor(enforced_client, failure) -> None:
+    user_id = _seed_user("target@example.test", "tenant-a", "traveler", "shared-device")
+    _seed_user("operator@example.test", "tenant-a", "security-operator", "operator-device")
+    operator_token = _sign_in(enforced_client, "operator@example.test", "operator-device")
+    legitimate_token = _sign_in(enforced_client, "target@example.test", "shared-device")
+    pending = enforced_client.post("/api/auth/login", json={
+        "email": "target@example.test", "password": "demo-password", "device_id": "shared-device",
+    }).json()
+    for _ in range(5):
+        if failure == "password":
+            response = enforced_client.post("/api/auth/login", json={
+                "email": "target@example.test", "password": "wrong", "device_id": "shared-device",
+            })
+        else:
+            response = enforced_client.post("/api/auth/mfa", json={
+                "session_id": pending["session_id"], "code": "000000" if totp_code("JBSWY3DPEHPK3PXP") != "000000" else "111111",
+            })
+        assert response.status_code == 401
+    events = enforced_client.get("/api/security/events", headers={
+        "Authorization": f"Bearer {operator_token}",
+    })
+    assert events.status_code == 200, events.text
+    denials = [event for event in events.json() if event["action"] == "auth.authenticate"]
+    assert len(denials) == 5
+    assert all(event["actor_user_id"] is None for event in denials)
+    assert all(event["resource"] == f"user:{user_id}" for event in denials)
+    assert all(event["session_id"] == (pending["session_id"] if failure == "mfa" else None) for event in denials)
+    assert enforced_client.get("/api/trips", headers={
+        "Authorization": f"Bearer {legitimate_token}",
+    }).status_code == 200
+
+
+def test_enrolled_legacy_owner_can_access_original_trip(enforced_client) -> None:
+    from app.models import User
+    from tests.db_helpers import get_booking
+
+    async def _legacy_owner(session):
+        owner = User(email="legacy@example.test")
+        session.add(owner)
+        await session.flush()
+        assert owner.id is not None
+        return owner.id
+
+    owner_id = run_db(_legacy_owner)
+    booking_id = _owned_booking(owner_id)
+    trip_id = run_db(lambda session: get_booking(session, booking_id)).trip_request_id
+    assert enforced_client.post("/api/auth/login", json={
+        "email": "legacy@example.test", "password": "chosen-password", "device_id": "demo-device",
+    }).status_code == 401
+
+    from scripts.enroll_identity import enroll_identity
+    run_db(lambda session: enroll_identity(session, "legacy@example.test", "chosen-password"))
+    login = enforced_client.post("/api/auth/login", json={
+        "email": "legacy@example.test", "password": "chosen-password", "device_id": "demo-device",
+    })
+    assert login.status_code == 200
+    verified = enforced_client.post("/api/auth/mfa", json={
+        "session_id": login.json()["session_id"], "code": totp_code("JBSWY3DPEHPK3PXP"),
+    })
+    assert verified.status_code == 200
+    headers = {"Authorization": f"Bearer {verified.json()['access_token']}"}
+    response = enforced_client.get(f"/api/trips/{trip_id}", headers=headers)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["id"] == trip_id
+    assert body["origin"] == "JFK"
+    assert body["destination_airport"] == "CDG"
+    with pytest.raises(ValueError, match="already enrolled"):
+        run_db(lambda session: enroll_identity(session, "legacy@example.test", "replacement-password"))

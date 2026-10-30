@@ -44,7 +44,7 @@ from tests.db_helpers import run_db
 
 _ALL_TABLES = (
     "booking_transition, execution_event, agent_run_step, agent_run, hitl_booking_log, "
-    "itinerary, flight_search_result, trip_request, user_account, connector_setting, security_event, security_session, security_incident"
+    "itinerary, flight_search_result, trip_request, user_account, connector_setting, security_event, security_session, security_incident, compliance_assessment"
 )
 
 
@@ -53,13 +53,11 @@ def _truncate_between_tests(request: pytest.FixtureRequest) -> None:
     if request.node.get_closest_marker("no_database") is not None:
         return
     async def _truncate(session: AsyncSession) -> None:
-        await session.execute(
-            text("ALTER TABLE security_event DISABLE TRIGGER security_event_no_truncate")
-        )
+        for table in ("security_event", "booking_transition", "execution_event", "compliance_assessment"):
+            await session.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER {table}_no_truncate"))
         await session.execute(text(f"TRUNCATE {_ALL_TABLES} RESTART IDENTITY CASCADE"))
-        await session.execute(
-            text("ALTER TABLE security_event ENABLE TRIGGER security_event_no_truncate")
-        )
+        for table in ("security_event", "booking_transition", "execution_event", "compliance_assessment"):
+            await session.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER {table}_no_truncate"))
 
     run_db(_truncate)
 
@@ -178,7 +176,7 @@ class FlightSearchSpy:
 
 @dataclass
 class PlannerRunSpy:
-    """Stands in for ``run_planner_durable`` so trip-planning tests never spend real LLM
+    """Stands in for the planner runner so trip-planning tests never spend real LLM
     quota, and counts calls so an idempotent /plan can assert the agent ran at most once."""
 
     output: ItineraryOut | ClarificationOut = field(
@@ -228,6 +226,11 @@ def client(
     from app.db import get_session
     from app.main import app
 
+    async def _idle_monitor():
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("app.main.monitor_security_controls", _idle_monitor)
+
     # DBOS tests use both the portal and pytest loops; pooled connections cannot cross them.
     app_engine = create_async_engine(TEST_DATABASE_URL, poolclass=NullPool)
     app_session_factory = async_sessionmaker(app_engine, expire_on_commit=False)
@@ -241,7 +244,7 @@ def client(
     app.dependency_overrides[get_session] = _override_get_session
     monkeypatch.setattr("app.dbos_runtime.get_flight_provider", lambda settings: booking_options_spy)
     monkeypatch.setattr("app.routes.trips.get_flight_provider", lambda settings: flight_search_spy)
-    monkeypatch.setattr("app.routes.trips.run_planner_durable", planner_spy)
+    monkeypatch.setattr("app.dbos_runtime._run_planner_workflow", planner_spy)
     # Zero-trust is enforced by default in production; these legacy route tests predate the auth
     # boundary and exercise trip/booking/rate-limit behavior with unauthenticated requests, so
     # this fixture runs them unenforced. The enforced path has its own suite (test_security*.py).

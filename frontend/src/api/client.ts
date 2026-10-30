@@ -2,6 +2,7 @@ import type {
   BookingLogOut,
   BookingRequestCreate,
   ConnectorsOut,
+  ComplianceMonitoringOut,
   ExecutionPanelOut,
   FlightSearchOut,
   GlobalExecutionPanelOut,
@@ -185,6 +186,14 @@ export function cancelBooking(logId: number): Promise<BookingLogOut> {
 
 export function getConnectors(): Promise<ConnectorsOut> {
   return request<ConnectorsOut>("/connectors")
+}
+
+export function getComplianceMonitoring(): Promise<ComplianceMonitoringOut> {
+  return request<ComplianceMonitoringOut>("/security/monitoring")
+}
+
+export function getSecurityEvent(eventId: number): Promise<Record<string, unknown>> {
+  return request<Record<string, unknown>>(`/security/events/${eventId}`)
 }
 
 export function setSlackConnectorEnabled(enabled: boolean): Promise<ConnectorsOut> {

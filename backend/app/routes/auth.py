@@ -3,10 +3,10 @@
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import config
 from app.db import get_session
 from app.schemas import LoginRequest, MfaVerifyRequest, ProblemDetail, TokenOut
 from app.security_identity import login_identity, verify_identity_mfa
+from app import security_posture as posture
 from app.rate_limit import enforce_login_rate_limit, enforce_request_rate_limit
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -14,7 +14,7 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 @router.get("/config")
 async def auth_config() -> dict[str, bool]:
-    return {"enforced": config.get_settings().zero_trust_enforced}
+    return {"enforced": posture.enforcement_active()}
 
 
 @router.post(
