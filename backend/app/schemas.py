@@ -18,6 +18,13 @@ from pydantic import (
 from app.models import AgentStepKind, ExecutionEventKind, FitnessLevel, TripStatus
 from app.state import BookingState
 
+# The planner's LLM-output schema is defined once in BAML (baml_src/travel_planner.baml) and
+# generated into baml_sdk. Re-exported here so the API/response layer keeps one import site.
+from baml_sdk import ActivityOut as ActivityOut
+from baml_sdk import ClarificationOut as ClarificationOut
+from baml_sdk import ItineraryDayOut as ItineraryDayOut
+from baml_sdk import ItineraryOut as ItineraryOut
+
 # Server timestamps are stored naive-UTC; serialize them with a +00:00 offset so a client doesn't
 # misread them as local time (which skewed the booking countdown by the viewer's UTC offset).
 UtcDatetime = Annotated[
@@ -136,29 +143,6 @@ class BookingLogOut(BaseModel):
     executed_at: UtcDatetime | None = None
     created_at: UtcDatetime
     transitions: list[BookingTransitionOut] = Field(default_factory=list)
-
-
-class ActivityOut(BaseModel):
-    name: str
-    description: str
-    # Closed vocabulary: free text here ("low to moderate (tram seated)") defeats every
-    # downstream safety check, so reject it at parse time and let pydantic-ai retry.
-    intensity: Literal["low", "moderate", "high"]
-    source_url: str
-
-
-class ItineraryDayOut(BaseModel):
-    day_number: int
-    summary: str
-    activities: list[ActivityOut]
-
-
-class ItineraryOut(BaseModel):
-    days: list[ItineraryDayOut]
-
-
-class ClarificationOut(BaseModel):
-    questions: list[str]
 
 
 class TripRequestCreate(BaseModel):

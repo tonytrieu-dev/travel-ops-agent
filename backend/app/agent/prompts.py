@@ -1,26 +1,29 @@
-"""Loads the travel-agent system prompt from AGENTS.md, and sanitizes untrusted Tavily
-content before it enters the model's context.
+"""Loads the travel-agent system prompt from its BAML definition, and sanitizes untrusted
+Tavily content before it enters the model's context.
 """
 
 import re
-from pathlib import Path
+import textwrap
+
+from baml_sdk import get_baml_source_files
 
 from app.config import MAX_TOOL_RESULT_CHARS
 
-_AGENTS_MD_PATH = Path(__file__).resolve().parents[3] / "AGENTS.md"
-_START_MARKER = "<!-- TRAVEL_AGENT_SYSTEM_PROMPT:START -->"
-_END_MARKER = "<!-- TRAVEL_AGENT_SYSTEM_PROMPT:END -->"
-_SECTION_PATTERN = re.compile(re.escape(_START_MARKER) + r"(.*?)" + re.escape(_END_MARKER), re.DOTALL)
+# Stop at ${ctx.output_format()}: pydantic-ai supplies that itself via the tool-output union.
+_PROMPT_FILE = "travel_planner.baml"
+_PROMPT_BODY_PATTERN = re.compile(r"prompt:\s*`(.*?)\$\{\s*ctx\.output_format\(\)\s*\}", re.DOTALL)
 
 
 def load_system_prompt() -> str:
-    text = _AGENTS_MD_PATH.read_text()
-    match = _SECTION_PATTERN.search(text)
+    source = get_baml_source_files().get(_PROMPT_FILE)
+    if source is None:
+        raise RuntimeError(f"BAML source {_PROMPT_FILE} not found in the generated SDK")
+    match = _PROMPT_BODY_PATTERN.search(source)
     if match is None:
         raise RuntimeError(
-            f"{_AGENTS_MD_PATH} is missing the {_START_MARKER}...{_END_MARKER} section"
+            f"{_PROMPT_FILE} is missing a PlanTrip prompt before ${{ctx.output_format()}}"
         )
-    return match.group(1).strip()
+    return textwrap.dedent(match.group(1)).strip()
 
 
 def sanitize_web_content(content: str) -> str:

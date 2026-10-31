@@ -17,6 +17,13 @@ frontend/dist/
 # DBOS local state
 .dbos/
 
+# BAML local telemetry/recording cache (regenerable)
+.baml/
+
+# BAML agent skill (local-only tooling)
+backend/.agents/
+backend/.claude/
+
 # OS
 .DS_Store
 
