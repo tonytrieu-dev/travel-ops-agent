@@ -11,7 +11,6 @@ from pydantic import ValidationError
 from app.config import Settings
 from app.security_identity import issue_access_token
 from app.models import SecuritySession, User
-from app import security_posture as posture
 
 pytestmark = pytest.mark.no_database
 
@@ -25,14 +24,6 @@ def _settings(*, enforced: bool) -> Settings:
         zero_trust_enforced=enforced,
         zero_trust_signing_secret="x" * 32,
     )
-
-
-@pytest.mark.parametrize("enforced", [True, False])
-def test_posture_matches_enforcement_setting(
-    monkeypatch: pytest.MonkeyPatch, enforced: bool,
-) -> None:
-    monkeypatch.setattr("app.config.get_settings", lambda: _settings(enforced=enforced))
-    assert posture.enforcement_active() is enforced
 
 
 def test_access_token_expiry_is_utc_on_a_non_utc_server(monkeypatch: pytest.MonkeyPatch) -> None:

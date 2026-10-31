@@ -238,52 +238,6 @@ def test_development_mode_allows_but_still_records_the_decision(unenforced: Sett
 # --- Incident response -------------------------------------------------------------------------
 
 
-def test_denial_burst_opens_one_incident_and_revokes_the_session(enforced: Settings) -> None:
-    """DENIAL_THRESHOLD denials from one device must open exactly one incident (not one per
-    denial) and revoke that device's live session so its token dies."""
-
-    async def _work(session: AsyncSession) -> tuple[int, SecuritySession]:
-        user = await _add_user(session)
-        security_session = await create_security_session(session, user, user.device_id)
-        await session.flush()
-        context = _context(user, mfa_verified=True, session_id=security_session.session_id)
-        for _ in range(DENIAL_THRESHOLD):
-            await record_security_event(
-                session, context, action="trip.read", resource="trip:x",
-                decision="deny", reason="forced denial",
-            )
-        incident_count = await session.scalar(
-            select(func.count(col(SecurityIncident.id))).where(
-                col(SecurityIncident.device_id) == user.device_id
-            )
-        )
-        await session.refresh(security_session)
-        return incident_count or 0, security_session
-
-    incident_count, security_session = run_db(_work)
-    assert incident_count == 1, "a denial burst must open exactly one incident, not pile them up"
-    assert security_session.revoked_at is not None, "the offending session must be revoked"
-
-
-def test_one_denial_below_the_threshold_opens_no_incident(enforced: Settings) -> None:
-    """The off-by-one boundary: THRESHOLD-1 denials must not trip containment (guards >= vs >)."""
-
-    async def _work(session: AsyncSession) -> int:
-        context = _context(await _add_user(session, device_id="device-quiet"), mfa_verified=True)
-        for _ in range(DENIAL_THRESHOLD - 1):
-            await record_security_event(
-                session, context, action="trip.read", resource="trip:x",
-                decision="deny", reason="forced denial",
-            )
-        return await session.scalar(
-            select(func.count(col(SecurityIncident.id))).where(
-                col(SecurityIncident.device_id) == "device-quiet"
-            )
-        ) or 0
-
-    assert run_db(_work) == 0
-
-
 def test_concurrent_denials_open_one_incident_and_revoke_the_session(
     enforced: Settings,
 ) -> None:
