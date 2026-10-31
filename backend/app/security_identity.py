@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import hmac
+import secrets
 import time
 from dataclasses import dataclass
 from datetime import UTC, timedelta
@@ -111,7 +112,9 @@ async def _authenticated_identity(
 
 
 def password_hash(password: str) -> str:
-    return hashlib.pbkdf2_hmac("sha256", password.encode(), b"travelops-demo", 120_000).hex()
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 600_000).hex()
+    return f"pbkdf2_sha256${salt.hex()}${digest}"
 
 
 def totp_code(secret: str, timestamp: int | None = None) -> str:
@@ -125,7 +128,25 @@ def totp_code(secret: str, timestamp: int | None = None) -> str:
 
 
 def password_matches(user: User, password: str) -> bool:
-    return bool(user.password_hash) and hmac.compare_digest(user.password_hash, password_hash(password))
+    stored = user.password_hash
+    if not stored:
+        return False
+    if "$" not in stored:
+        # Existing credentials are upgraded only after a successful login.
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode(), b"travelops-demo", 120_000).hex()
+        return hmac.compare_digest(stored, digest)
+    parts = stored.split("$")
+    if len(parts) != 3 or parts[0] != "pbkdf2_sha256":
+        return False
+    try:
+        salt = bytes.fromhex(parts[1])
+        expected = bytes.fromhex(parts[2])
+    except ValueError:
+        return False
+    if len(salt) != 16 or len(expected) != 32:
+        return False
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 600_000)
+    return hmac.compare_digest(expected, digest)
 
 
 # --- Session lifecycle: create a pending session and upgrade it once MFA is verified
@@ -203,6 +224,8 @@ async def login_identity(
             request=request,
         )
         raise HTTPException(status_code=401, detail="invalid credentials")
+    if "$" not in user.password_hash:
+        user.password_hash = password_hash(body.password)
     security_session = await create_security_session(session, user, body.device_id)
     await record_security_event(
         session, None, action="auth.login", resource=f"user:{user.id}", decision="allow",

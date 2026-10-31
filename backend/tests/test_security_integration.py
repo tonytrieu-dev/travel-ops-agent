@@ -390,3 +390,35 @@ def test_enrolled_legacy_owner_can_access_original_trip(enforced_client) -> None
     assert body["destination_airport"] == "CDG"
     with pytest.raises(ValueError, match="already enrolled"):
         run_db(lambda session: enroll_identity(session, "legacy@example.test", "replacement-password"))
+
+
+def test_legacy_password_is_upgraded_only_after_valid_login(enforced_client) -> None:
+    import hashlib
+
+    from app.models import User
+
+    legacy_hash = hashlib.pbkdf2_hmac("sha256", b"demo-password", b"travelops-demo", 120_000).hex()
+    user_id = _seed_user("legacy-salt@example.test", "tenant-a", "traveler", "device-a")
+
+    async def seed_legacy(session):
+        user = await session.get(User, user_id)
+        assert user is not None
+        user.password_hash = legacy_hash
+
+    async def stored_credentials(session):
+        user = await session.get(User, user_id)
+        assert user is not None
+        return user.password_hash
+
+    original_credentials = run_db(stored_credentials)
+    run_db(seed_legacy)
+    credentials = {"email": "legacy-salt@example.test", "device_id": "device-a"}
+    rejected = enforced_client.post("/api/auth/login", json={**credentials, "password": "wrong"})
+    assert rejected.status_code == 401
+    assert run_db(stored_credentials) == legacy_hash
+    accepted = enforced_client.post("/api/auth/login", json={**credentials, "password": "demo-password"})
+    assert accepted.status_code == 200, accepted.text
+    upgraded = run_db(stored_credentials)
+    assert upgraded != legacy_hash
+    assert upgraded != original_credentials, "same password must receive a fresh salt"
+    assert enforced_client.post("/api/auth/login", json={**credentials, "password": "demo-password"}).status_code == 200
