@@ -83,14 +83,14 @@ export function LoginPanel({ onAuthenticated }: { onAuthenticated: () => void })
             <input aria-label="Email" required type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Email" className="w-full rounded border p-2" />
             <input aria-label="Password" required type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Password" className="w-full rounded border p-2" />
             <input aria-label="Device" required value={deviceId} onChange={(event) => setDeviceId(event.target.value)} placeholder="Device ID" className="w-full rounded border p-2" />
-            <button className="w-full rounded bg-indigo-600 p-2 text-white">Continue to MFA</button>
+            <button type="submit" className="w-full rounded bg-indigo-600 p-2 text-white">Continue to MFA</button>
           </>
         ) : (
           <>
             <label className="block text-sm">Enter your authenticator code
               <input aria-label="MFA code" required inputMode="numeric" value={code} onChange={(event) => setCode(event.target.value)} className="mt-1 w-full rounded border p-2" />
             </label>
-            <button className="w-full rounded bg-indigo-600 p-2 text-white">Verify and sign in</button>
+            <button type="submit" className="w-full rounded bg-indigo-600 p-2 text-white">Verify and sign in</button>
             <button type="button" onClick={restartSignIn} className="w-full rounded border border-slate-300 p-2 text-sm text-slate-600">Start over</button>
           </>
         )}
