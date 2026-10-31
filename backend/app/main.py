@@ -27,6 +27,7 @@ from app.request_context import bind_correlation_id
 from app.routes.connectors import ConnectorError
 from app.schemas import ErrorCode, ProblemDetail
 from app.security_admission import SecurityError
+from app.security_identity import SESSION_COOKIE_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,16 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Travel Agent API", version="0.1.0", lifespan=_lifespan)
 
     @app.middleware("http")
+    async def protect_browser_writes(request: Request, call_next):
+        browser_write = request.cookies.get(SESSION_COOKIE_NAME) or request.url.path.startswith("/api/auth/browser/")
+        if (
+            request.method not in {"GET", "HEAD", "OPTIONS"} and browser_write
+            and request.headers.get("origin") != settings.frontend_origin
+        ):
+            return JSONResponse(status_code=403, content={"code": "forbidden", "detail": "trusted browser origin required"})
+        return await call_next(request)
+
+    @app.middleware("http")
     async def correlation_id(request: Request, call_next):
         request.state.correlation_id = request.headers.get("x-correlation-id") or str(uuid4())
         with bind_correlation_id(request.state.correlation_id):
@@ -69,6 +80,7 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[settings.frontend_origin],
+        allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
         expose_headers=["x-correlation-id"],

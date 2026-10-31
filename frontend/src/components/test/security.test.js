@@ -9,7 +9,7 @@ const { BookingModule } = await import("../BookingModule.tsx")
 
 for (const failure of ["forbidden", "network"]) {
   test(`connector initial ${failure} failure displays an error`, async (context) => {
-    session(`connector-${failure}`)
+    await session(`connector-${failure}`)
     context.mock.method(globalThis, "fetch", async () => {
       if (failure === "network") throw new TypeError("Network unavailable")
       return response({ detail: "operator required" }, 403)
@@ -21,7 +21,7 @@ for (const failure of ["forbidden", "network"]) {
   })
 }
 test("forbidden traveler connector navigation requests settings at most once", async (context) => {
-  session("navigation-session")
+  await session("navigation-session")
   let requests = 0
   context.mock.method(globalThis, "fetch", async () => { requests++; return response({ detail: "operator required" }, 403) })
   for (let visit = 0; visit < 6; visit++) {

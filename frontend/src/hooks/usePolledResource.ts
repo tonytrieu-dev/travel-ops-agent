@@ -1,4 +1,4 @@
-import { ApiError, getAccessToken } from "../api/client.ts"
+import { ApiError, getSessionId } from "../api/client.ts"
 import { useEffect, useRef, useState } from "react"
 
 const ACTIVE_POLL_MS = 700
@@ -13,16 +13,16 @@ interface PolledResourceOptions<T> {
   errorText: string
 }
 
-let deniedSessionToken: string | null = null
+let deniedSessionId: string | null = null
 const deniedResourceKeys = new Set<string>()
 
 function isDeniedForCurrentSession(resourceKey: string): boolean {
-  const accessToken = getAccessToken()
-  if (accessToken !== deniedSessionToken) {
-    deniedSessionToken = accessToken
+  const sessionId = getSessionId()
+  if (sessionId !== deniedSessionId) {
+    deniedSessionId = sessionId
     deniedResourceKeys.clear()
   }
-  return accessToken !== null && deniedResourceKeys.has(resourceKey)
+  return sessionId !== null && deniedResourceKeys.has(resourceKey)
 }
 
 interface PolledResourceState<T> {
@@ -51,18 +51,18 @@ export function usePolledResource<T>({
         setErrorMessage(errorText)
         return
       }
-      const sessionToken = getAccessToken()
+      const sessionId = getSessionId()
       isFetchingRef.current = true
       try {
         const result = await fetcher()
-        if (!current || sessionToken !== getAccessToken()) return
+        if (!current || sessionId !== getSessionId()) return
         setData(result)
         setErrorMessage(null)
       } catch (error) {
-        if (!current || sessionToken !== getAccessToken()) return
+        if (!current || sessionId !== getSessionId()) return
         if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
-          if (sessionToken !== null) {
-            deniedSessionToken = sessionToken
+          if (sessionId !== null) {
+            deniedSessionId = sessionId
             deniedResourceKeys.add(resourceKey)
           }
         }

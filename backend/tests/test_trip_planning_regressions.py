@@ -195,3 +195,25 @@ def test_trip_edit_waits_for_final_itinerary_write(client) -> None:
     snapshot = client.get(f'/api/trips/{trip_id}/snapshot').json()
     assert snapshot['trip']['fitness_level'] == 'low'
     assert snapshot['plan'] is None
+
+
+def test_flight_search_edit_race(client, flight_search_spy, monkeypatch):
+    started, release = Event(), Event()
+    original = flight_search_spy.search_offers
+    async def paused(*arguments):
+        started.set()
+        assert await asyncio.to_thread(release.wait, 10)
+        return await original(*arguments)
+    monkeypatch.setattr(flight_search_spy, 'search_offers', paused)
+    trip = client.post('/api/trips', json={'origin':'JFK','destination':'Paris','destination_airport':'CDG','depart_date':'2030-08-01','age':30,'fitness_level':'high'}).json()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        search = pool.submit(client.post, f"/api/trips/{trip['id']}/flights/search")
+        try:
+            assert started.wait(10)
+            assert client.patch(f"/api/trips/{trip['id']}", json={'destination':'London','destination_airport':'LHR'}).status_code == 200
+        finally:
+            release.set()
+        assert search.result(timeout=15).status_code == 409
+    snapshot = client.get(f"/api/trips/{trip['id']}/snapshot").json()
+    assert snapshot['trip']['destination_airport'] == 'LHR'
+    assert snapshot['flight_search'] is None, 'Old CDG search was persisted under updated LHR trip'

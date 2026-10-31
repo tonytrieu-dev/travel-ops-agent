@@ -8,7 +8,7 @@ import { ApiError } from "../api/client.ts"
 
 const options = { isRunActive: true, resourceKey: "execution", errorText: "Cannot load" }
 test("cached denial displays an error after remount and resets for another session", async () => {
-  session("denied-session")
+  await session("denied-session")
   let requests = 0
   const fetcher = async () => { requests++; throw new ApiError({ code: "forbidden", detail: "denied" }, 403) }
   const props = { ...options, isRunActive: false, resourceKey: "denied-remount", fetcher }
@@ -21,7 +21,7 @@ test("cached denial displays an error after remount and resets for another sessi
   assert.equal(requests, 1)
   assert.equal(second.result.current.errorMessage, "Cannot load")
   second.unmount()
-  session("replacement-session")
+  await session("replacement-session")
   renderHook(() => usePolledResource(props))
   await act(async () => {})
   assert.equal(requests, 2)
@@ -51,7 +51,7 @@ test("resource switching discards old results and fetches only the latest select
 
 for (const status of [401, 403, 500]) {
   test(`active polling ${status === 500 ? "retries" : "stops after"} HTTP ${status}`, async (context) => {
-    session(`timer-${status}`)
+    await session(`timer-${status}`)
     let tick
     context.mock.method(globalThis, "setInterval", (callback) => { tick = callback; return 1 })
     context.mock.method(globalThis, "clearInterval", () => {})

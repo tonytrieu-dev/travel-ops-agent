@@ -366,12 +366,15 @@ class MfaVerifyRequest(BaseModel):
     code: str = Field(pattern=r"^[0-9]{6}$")
 
 
-class TokenOut(BaseModel):
-    access_token: str
-    token_type: Literal["Bearer"] = "Bearer"
+class BrowserLoginOut(BaseModel):
     expires_at: UtcDatetime
     session_id: str
     mfa_required: bool
+
+
+class TokenOut(BrowserLoginOut):
+    access_token: str
+    token_type: Literal["Bearer"] = "Bearer"
 
 
 class SecurityEventOut(BaseModel):

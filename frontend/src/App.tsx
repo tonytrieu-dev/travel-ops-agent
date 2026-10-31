@@ -3,7 +3,7 @@ import {
   AUTHENTICATION_REQUIRED_EVENT,
   ApiError,
   createTrip,
-  getAccessToken,
+  getBrowserSession,
   getAuthConfig,
   getTripSnapshot,
   listTrips,
@@ -151,7 +151,10 @@ function App() {
 
   useEffect(() => {
     getAuthConfig()
-      .then(({ enforced }) => setIsAuthenticated(!enforced || Boolean(getAccessToken())))
+      .then(async ({ enforced }) => {
+        if (enforced) await getBrowserSession()
+        setIsAuthenticated(true)
+      })
       .catch(() => setIsAuthenticated(false))
   }, [])
 

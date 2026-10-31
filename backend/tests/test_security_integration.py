@@ -392,36 +392,50 @@ def test_enrolled_legacy_owner_can_access_original_trip(enforced_client) -> None
         run_db(lambda session: enroll_identity(session, "legacy@example.test", "replacement-password"))
 
 
-def test_legacy_password_is_upgraded_only_after_valid_login(enforced_client) -> None:
-    import hashlib
+def test_legacy_passwords_are_retired_and_require_enrollment(enforced_client) -> None:
+    from importlib.util import module_from_spec, spec_from_file_location
+    from pathlib import Path
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from sqlalchemy import select
+    from app.models import User, SecuritySession
+    from sqlmodel import col
+    from scripts.enroll_identity import enroll_identity
 
-    from app.models import User
-
-    legacy_hash = hashlib.pbkdf2_hmac("sha256", b"demo-password", b"travelops-demo", 120_000).hex()
     user_id = _seed_user("legacy-salt@example.test", "tenant-a", "traveler", "device-a")
+    other_id = _seed_user("modern@example.test", "tenant-a", "traveler", "device-b")
+    token = _sign_in(enforced_client, "legacy-salt@example.test", "device-a")
 
     async def seed_legacy(session):
         user = await session.get(User, user_id)
         assert user is not None
-        user.password_hash = legacy_hash
+        user.password_hash = "a" * 64
 
-    async def stored_credentials(session):
-        user = await session.get(User, user_id)
-        assert user is not None
-        return user.password_hash
-
-    original_credentials = run_db(stored_credentials)
     run_db(seed_legacy)
-    credentials = {"email": "legacy-salt@example.test", "device_id": "device-a"}
-    rejected = enforced_client.post("/api/auth/login", json={**credentials, "password": "wrong"})
-    assert rejected.status_code == 401
-    assert run_db(stored_credentials) == legacy_hash
-    accepted = enforced_client.post("/api/auth/login", json={**credentials, "password": "demo-password"})
-    assert accepted.status_code == 200, accepted.text
-    upgraded = run_db(stored_credentials)
-    assert upgraded != legacy_hash
-    assert upgraded != original_credentials, "same password must receive a fresh salt"
-    assert enforced_client.post("/api/auth/login", json={**credentials, "password": "demo-password"}).status_code == 200
+    credentials = {"email": "legacy-salt@example.test", "device_id": "device-a", "password": "demo-password"}
+    assert enforced_client.post("/api/auth/login", json=credentials).status_code == 401
+
+    async def retire(session):
+        connection = await session.connection()
+        def upgrade(connection):
+            specification = spec_from_file_location("retire_legacy", Path(__file__).parents[1] / "alembic/versions/5d9f1b3c4e67_retire_legacy_passwords.py")
+            assert specification is not None and specification.loader is not None
+            migration = module_from_spec(specification)
+            specification.loader.exec_module(migration)
+            with Operations.context(MigrationContext.configure(connection)):
+                migration.upgrade()
+        await connection.run_sync(upgrade)
+        user = await session.get(User, user_id)
+        other = await session.get(User, other_id)
+        assert user is not None and user.password_hash == ""
+        assert other is not None and other.password_hash.startswith("pbkdf2_sha256$")
+        sessions = list(await session.scalars(select(SecuritySession).where(col(SecuritySession.user_id) == user_id)))
+        assert sessions and all(item.revoked_at is not None for item in sessions)
+
+    run_db(retire)
+    assert enforced_client.get('/api/trips', headers={'Authorization': f'Bearer {token}'}).status_code == 401
+    run_db(lambda session: enroll_identity(session, 'legacy-salt@example.test', 'replacement-password'))
+    assert enforced_client.post('/api/auth/login', json={**credentials, 'password':'replacement-password'}).status_code == 200
 
 
 def test_totp_code_cannot_verify_two_sessions_concurrently(enforced_client, monkeypatch) -> None:
@@ -477,3 +491,45 @@ def test_password_verification_keeps_other_requests_responsive(enforced_client, 
         finally:
             release.set()
         assert login.result(timeout=10).status_code == 200
+
+
+def test_browser_session_uses_cookie_and_rejects_cross_origin_writes(enforced_client) -> None:
+    enforced_client.base_url = "https://testserver"
+    _seed_user("browser@example.test", "tenant-a", "traveler", "device-a")
+    origin = {"Origin": "http://localhost:5173"}
+    rejected = enforced_client.post("/api/auth/browser/login", headers={"Origin": "https://attacker.test"}, json={
+        "email": "browser@example.test", "password": "demo-password", "device_id": "device-a",
+    })
+    assert rejected.status_code == 403 and not rejected.cookies
+    response = enforced_client.post('/api/auth/browser/login', headers=origin, json={
+        'email': 'browser@example.test', 'password': 'demo-password', 'device_id': 'device-a',
+    })
+    assert response.status_code == 200, response.text
+    assert 'access_token' not in response.json()
+    assert not response.cookies
+    verified = enforced_client.post('/api/auth/browser/mfa', headers=origin, json={
+        'session_id': response.json()['session_id'], 'code': totp_code('JBSWY3DPEHPK3PXP'),
+    })
+    assert verified.status_code == 200, verified.text
+    assert 'access_token' not in verified.json()
+    cookie = verified.headers['set-cookie']
+    assert 'Secure' in cookie and 'HttpOnly' in cookie and 'SameSite=strict' in cookie and 'Path=/api' in cookie
+    assert enforced_client.get('/api/auth/browser/session').status_code == 200
+    assert enforced_client.get('/api/trips').status_code == 200
+    payload = {'origin':'JFK', 'destination':'Paris', 'destination_airport':'CDG', 'depart_date':'2030-08-01', 'age':30, 'fitness_level':'high'}
+    for headers in ({}, {'Origin':'https://attacker.test'}, {'Origin':'null'}):
+        assert enforced_client.post('/api/trips', json=payload, headers=headers).status_code == 403
+    assert enforced_client.post('/api/trips', json=payload, headers=origin).status_code == 200
+    preflight = enforced_client.options('/api/trips', headers={**origin, 'Access-Control-Request-Method':'POST'})
+    assert preflight.headers['access-control-allow-credentials'] == 'true'
+
+    async def revoke_browser_session(session):
+        from sqlalchemy import select
+        from sqlmodel import col
+        from app.models import SecuritySession, utcnow
+        persisted = await session.scalar(select(SecuritySession).where(col(SecuritySession.session_id) == verified.json()["session_id"]))
+        assert persisted is not None
+        persisted.revoked_at = utcnow()
+
+    run_db(revoke_browser_session)
+    assert enforced_client.get('/api/auth/browser/session').status_code == 401

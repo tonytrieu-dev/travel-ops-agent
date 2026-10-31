@@ -30,9 +30,11 @@ registerHooks({
 const { cleanup } = await import("@testing-library/react")
 beforeEach(() => localStorage.clear())
 afterEach(cleanup)
-export function session(token = "test-session") {
-  localStorage.setItem("travel-agent.verifiedAccessToken", token)
-  localStorage.setItem("travel-agent.verifiedAccessTokenExpiresAt", "2099-01-01T00:00:00Z")
+export async function session(identifier = "test-session") {
+  const { getBrowserSession } = await import("../api/client.ts")
+  const original = globalThis.fetch
+  globalThis.fetch = async () => response({ session_id: identifier })
+  try { await getBrowserSession() } finally { globalThis.fetch = original }
 }
 export function deferred() {
   let resolve, reject

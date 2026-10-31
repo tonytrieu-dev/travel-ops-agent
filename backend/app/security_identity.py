@@ -24,6 +24,9 @@ from app import security_posture as posture
 from app.security_token_issuer import issue_token, verify_token
 
 
+SESSION_COOKIE_NAME = "travel_agent_session"
+
+
 @dataclass(frozen=True)
 class SecurityContext:
     tenant_id: str
@@ -122,6 +125,7 @@ def totp_code(secret: str, timestamp: int | None = None) -> str:
     timestamp = int(time.time()) if timestamp is None else timestamp
     counter = timestamp // 30
     key = base64.b32decode(secret + "=" * (-len(secret) % 8), casefold=True)
+    # RFC 6238 uses HMAC-SHA-1 for compatibility with enrolled authenticators.
     digest = hmac.new(key, counter.to_bytes(8, "big"), hashlib.sha1).digest()
     offset = digest[-1] & 0x0F
     number = int.from_bytes(digest[offset : offset + 4], "big") & 0x7FFFFFFF
@@ -132,10 +136,6 @@ def password_matches(user: User, password: str) -> bool:
     stored = user.password_hash
     if not stored:
         return False
-    if "$" not in stored:
-        # Existing credentials are upgraded only after a successful login.
-        digest = hashlib.pbkdf2_hmac("sha256", password.encode(), b"travelops-demo", 120_000).hex()
-        return hmac.compare_digest(stored, digest)
     parts = stored.split("$")
     if len(parts) != 3 or parts[0] != "pbkdf2_sha256":
         return False
@@ -237,8 +237,6 @@ async def login_identity(
             request=request,
         )
         raise HTTPException(status_code=401, detail="invalid credentials")
-    if "$" not in user.password_hash:
-        user.password_hash = await run_in_threadpool(password_hash, body.password)
     security_session = await create_security_session(session, user, body.device_id)
     await record_security_event(
         session, None, action="auth.login", resource=f"user:{user.id}", decision="allow",

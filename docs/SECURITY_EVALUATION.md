@@ -1,7 +1,7 @@
 # Zero-trust evaluation
 
 Historical validation on 2026-10-14 used real PostgreSQL 14.24 in an isolated local cluster, Python 3.13.11,
-and migrations through `7c2d4e6f8a10`. FastAPI requests run through `TestClient`; flight/search and
+and migrations through `5d9f1b3c4e67`. FastAPI requests run through `TestClient`; flight/search and
 model providers are test doubles. No live booking or paid provider calls are part of this run.
 
 The default suite runs focused regressions; the latency benchmark is opt-in.

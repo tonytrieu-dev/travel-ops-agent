@@ -87,10 +87,13 @@ class FlightSearchService:
         # Captured once per call so every branch (cache hit, cross-trip cache, live) can
         # finalize agent_run.started_at/total_ms consistently with the pre-refactor
         # _record_search_flights_run, which timed the whole call, not just the provider hop.
+        searched_criteria = (trip.origin, trip.destination_airport, trip.depart_date, trip.return_date)
         run_started_at = utcnow()
         run_started_monotonic = time.monotonic()
 
         same_trip_cache = await self._get_same_trip_cache(trip)
+        if same_trip_cache and persist:
+            trip = await self._lock_unchanged_trip(trip_id, searched_criteria)
         if same_trip_cache:
             await self._log(
                 trip, agent_run, "ok",
@@ -113,6 +116,7 @@ class FlightSearchService:
                     )
                     for source_offer in cross_trip_offers
                 ]
+                trip = await self._lock_unchanged_trip(trip_id, searched_criteria)
                 self._session.add_all(results)
                 trip.status = TripStatus.FLIGHTS_SEARCHED
                 await self._session.commit()
@@ -137,6 +141,7 @@ class FlightSearchService:
             for index, offer in enumerate(outcome.offers)
         ]
         if persist:
+            trip = await self._lock_unchanged_trip(trip_id, searched_criteria)
             self._session.add_all(results)
             if results:
                 trip.status = TripStatus.FLIGHTS_SEARCHED
@@ -150,6 +155,17 @@ class FlightSearchService:
             provider_duration_ms,
         )
         return TripFlightSearchOutcome(cheapest_first(results), outcome.unavailable_reason, "live")
+
+    async def _lock_unchanged_trip(
+        self, trip_id: int, searched_criteria: tuple[str, str, str, str | None],
+    ) -> TripRequest:
+        trip = await self._session.scalar(
+            select(TripRequest).where(col(TripRequest.id) == trip_id)
+            .with_for_update().execution_options(populate_existing=True)
+        )
+        if trip is None or (trip.origin, trip.destination_airport, trip.depart_date, trip.return_date) != searched_criteria:
+            raise TripError(ErrorCode.INVALID_TRANSITION, 409, "The trip changed during flight search; search again.")
+        return trip
 
     async def _get_same_trip_cache(self, trip: TripRequest) -> list[FlightSearchResult]:
         cutoff = utcnow() - timedelta(minutes=FLIGHT_CACHE_TTL_MINUTES)

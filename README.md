@@ -23,9 +23,13 @@ With no `ZERO_TRUST_SIGNING_SECRET` set, the app generates a fresh per-process s
 for a deployment whose tokens must survive a restart. Production should put Keycloak or another
 OIDC provider in front of the API and use mTLS/service-mesh identity for internal traffic.
 
-The SPA signs in through `POST /api/auth/login`, submits the returned session to
-`POST /api/auth/mfa`, stores the resulting 15-minute bearer token in browser storage, and attaches it
-to every protected request. Set `ZERO_TRUST_SIGNING_SECRET` and use the seeded demo credentials or a
+The SPA signs in through `POST /api/auth/browser/login` and
+`POST /api/auth/browser/mfa`. The API sets a 15-minute HttpOnly, SameSite=Strict cookie;
+browser responses omit the bearer token. Requests include cookies, and browser writes
+must send the configured `FRONTEND_ORIGIN`. HTTPS is required outside loopback development;
+use the same site for the frontend and API so Strict cookies are sent. The original
+`/api/auth/login` and `/api/auth/mfa` endpoints remain available to bearer-token CLI clients.
+Set `ZERO_TRUST_SIGNING_SECRET` and use the seeded demo credentials or a
 local user; MFA-enabled users must complete the TOTP step. Connector settings are deployment-wide,
 not tenant-owned, and both reading and changing them require the `security-operator` or `admin` role
 plus verified MFA.
@@ -80,7 +84,11 @@ cd backend
 uv run python -m scripts.security_demo
 ```
 
-For an existing account left with an empty password hash by the security migration,
+Stop API writers while applying migration `5d9f1b3c4e67`; deploy the updated API
+and frontend together. This migration clears fixed-salt password hashes and revokes their sessions.
+It preserves account ownership and modern password hashes. Cleared hashes cannot be
+restored by downgrade; those accounts must enroll a new password.
+For an existing account left with an empty password hash by a security migration,
 run `uv run python -m scripts.enroll_identity --email <existing-account-email>` from
 `backend`. A trusted local database operator must run this command. It prompts for
 and confirms a chosen password without placing it in command arguments. It refuses

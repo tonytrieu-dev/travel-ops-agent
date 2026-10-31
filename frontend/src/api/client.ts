@@ -15,12 +15,10 @@ import type {
 } from "./types"
 
 const API_BASE_URL = import.meta.env?.VITE_API_BASE_URL ?? "http://localhost:8000/api"
-const ACCESS_TOKEN_STORAGE_KEY = "travel-agent.verifiedAccessToken"
-const ACCESS_TOKEN_EXPIRATION_STORAGE_KEY = "travel-agent.verifiedAccessTokenExpiresAt"
+let sessionId: string | null = null
 export const AUTHENTICATION_REQUIRED_EVENT = "travel-agent:authentication-required"
 
 export type LoginResult = {
-  access_token: string
   expires_at: string
   session_id: string
   mfa_required: boolean
@@ -28,20 +26,13 @@ export type LoginResult = {
 
 export type AuthConfig = { enforced: boolean }
 
-function clearCredentials(): void {
-  localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY)
-  localStorage.removeItem(ACCESS_TOKEN_EXPIRATION_STORAGE_KEY)
+export function getSessionId(): string | null {
+  return sessionId
 }
 
-export function getAccessToken(): string | null {
-  const accessToken = localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY)
-  const expiresAt = localStorage.getItem(ACCESS_TOKEN_EXPIRATION_STORAGE_KEY)
-  const expiration = Date.parse(expiresAt ?? "")
-  if (!accessToken || !Number.isFinite(expiration) || expiration <= Date.now()) {
-    clearCredentials()
-    return null
-  }
-  return accessToken
+export async function getBrowserSession(): Promise<void> {
+  const result = await request<{ session_id: string }>("/auth/browser/session", undefined, false)
+  sessionId = result.session_id
 }
 
 export function getAuthConfig(): Promise<AuthConfig> {
@@ -64,18 +55,19 @@ async function request<TResponse>(
   options?: RequestInit,
   announceAuthenticationRequired = true,
 ): Promise<TResponse> {
-  const accessToken = getAccessToken()
+  localStorage.removeItem("travel-agent.verifiedAccessToken")
+  localStorage.removeItem("travel-agent.verifiedAccessTokenExpiresAt")
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...options,
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
-      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       ...options?.headers,
     },
   })
 
   if (response.status === 401 && announceAuthenticationRequired) {
-    clearCredentials()
+    sessionId = null
     window.dispatchEvent(new Event(AUTHENTICATION_REQUIRED_EVENT))
   }
   if (!response.ok) {
@@ -87,26 +79,21 @@ async function request<TResponse>(
 }
 
 export async function login(email: string, password: string, device_id: string): Promise<LoginResult> {
-  const result = await request<LoginResult>("/auth/login", {
+  const result = await request<LoginResult>("/auth/browser/login", {
     method: "POST",
     body: JSON.stringify({ email, password, device_id }),
   }, false)
-  if (!result.mfa_required) storeCredentials(result)
+  if (!result.mfa_required) sessionId = result.session_id
   return result
 }
 
 export async function verifyMfa(session_id: string, code: string): Promise<LoginResult> {
-  const result = await request<LoginResult>("/auth/mfa", {
+  const result = await request<LoginResult>("/auth/browser/mfa", {
     method: "POST",
     body: JSON.stringify({ session_id, code }),
   }, false)
-  storeCredentials(result)
+  sessionId = result.session_id
   return result
-}
-
-function storeCredentials(result: LoginResult): void {
-  localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, result.access_token)
-  localStorage.setItem(ACCESS_TOKEN_EXPIRATION_STORAGE_KEY, result.expires_at)
 }
 
 export function createTrip(tripRequestCreate: TripRequestCreate): Promise<TripRequestOut> {

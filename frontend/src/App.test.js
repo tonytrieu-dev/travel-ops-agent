@@ -9,8 +9,8 @@ const { LoginPanel, default: App } = await import("./App.tsx")
 // F8: an expired/failed MFA challenge must be recoverable without a page reload.
 test("MFA restart returns to the email/password step", async (context) => {
   context.mock.method(globalThis, "fetch", async (url, init) => {
-    if (url.endsWith("/auth/login")) return response({ mfa_required: true, session_id: "s1", access_token: "", expires_at: "" })
-    if (url.endsWith("/auth/mfa")) return response({ code: "forbidden", detail: "challenge expired" }, 403)
+    if (url.endsWith("/auth/browser/login")) return response({ mfa_required: true, session_id: "s1", access_token: "", expires_at: "" })
+    if (url.endsWith("/auth/browser/mfa")) return response({ code: "forbidden", detail: "challenge expired" }, 403)
     throw new Error(`unexpected ${init?.method} ${url}`)
   })
   const view = render(createElement(LoginPanel, { onAuthenticated: () => {} }))
