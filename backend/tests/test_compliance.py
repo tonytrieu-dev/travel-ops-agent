@@ -199,12 +199,17 @@ def test_audit_assessment_rejects_conditional_mutation_trigger() -> None:
 
 
 @pytest.mark.parametrize("same_actor", [False, True])
-def test_shared_device_denials_are_scoped_to_each_session(enforced_client, same_actor) -> None:
+def test_shared_device_denials_are_scoped_to_each_session(enforced_client, same_actor, monkeypatch) -> None:
+    from types import SimpleNamespace
+    from app import security_identity
+    timestamp = int(security_identity.time.time())
+    monkeypatch.setattr(security_identity, "time", SimpleNamespace(time=lambda: timestamp))
     _seed_user("first@a.test", "tenant-a", "traveler", "shared-device")
     if not same_actor:
         _seed_user("second@a.test", "tenant-a", "traveler", "shared-device")
     _seed_user("operator@a.test", "tenant-a", "security-operator", "operator-a")
     first = _sign_in(enforced_client, "first@a.test", "shared-device")
+    timestamp += 30
     second = _sign_in(enforced_client, "first@a.test" if same_actor else "second@a.test", "shared-device")
     operator = _sign_in(enforced_client, "operator@a.test", "operator-a")
     first_headers = {"Authorization": f"Bearer {first}"}

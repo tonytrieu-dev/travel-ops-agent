@@ -422,3 +422,58 @@ def test_legacy_password_is_upgraded_only_after_valid_login(enforced_client) -> 
     assert upgraded != legacy_hash
     assert upgraded != original_credentials, "same password must receive a fresh salt"
     assert enforced_client.post("/api/auth/login", json={**credentials, "password": "demo-password"}).status_code == 200
+
+
+def test_totp_code_cannot_verify_two_sessions_concurrently(enforced_client, monkeypatch) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from types import SimpleNamespace
+    import time
+    timestamp = int(time.time())
+    monkeypatch.setattr("app.security_identity.time", SimpleNamespace(time=lambda: timestamp))
+    _seed_user("replay@example.test", "tenant-a", "traveler", "device-a")
+    pending = [enforced_client.post("/api/auth/login", json={
+        "email": "replay@example.test", "password": "demo-password", "device_id": "device-a",
+    }).json()["session_id"] for _ in range(2)]
+    barrier = Barrier(2)
+
+    def verify(session_id):
+        barrier.wait(timeout=5)
+        return enforced_client.post("/api/auth/mfa", json={
+            "session_id": session_id, "code": totp_code("JBSWY3DPEHPK3PXP"),
+        })
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(verify, pending))
+    assert sorted(response.status_code for response in responses) == [200, 401]
+    token = next(response.json()["access_token"] for response in responses if response.status_code == 200)
+    assert enforced_client.get("/api/trips", headers={"Authorization": f"Bearer {token}"}).status_code == 200
+
+
+def test_password_verification_keeps_other_requests_responsive(enforced_client, monkeypatch) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from app.security_identity import password_matches
+
+    _seed_user("worker@example.test", "tenant-a", "traveler", "device-a")
+    started = Event()
+    release = Event()
+
+    def blocked_password_check(user, password):
+        started.set()
+        assert release.wait(10), "password worker was never released"
+        return password_matches(user, password)
+
+    monkeypatch.setattr("app.security_identity.password_matches", blocked_password_check)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        login = pool.submit(enforced_client.post, "/api/auth/login", json={
+            "email": "worker@example.test", "password": "demo-password", "device_id": "device-a",
+        })
+        try:
+            assert started.wait(5)
+            configuration = pool.submit(enforced_client.get, "/api/auth/config")
+            assert configuration.result(timeout=3).status_code == 200
+        finally:
+            release.set()
+        assert login.result(timeout=10).status_code == 200

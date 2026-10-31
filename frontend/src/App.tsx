@@ -137,7 +137,11 @@ function App() {
   // Selection-changing handlers call beginSelection(); handlers acting on the current selection
   // capture activeRequest.current and discard their result if a newer selection superseded it.
   const activeRequest = useRef(0)
-  const beginSelection = () => (activeRequest.current += 1)
+  const beginSelection = () => {
+    setIsPlanning(false)
+    setIsSearchingFlights(false)
+    return (activeRequest.current += 1)
+  }
 
   useEffect(() => {
     const requireAuthentication = () => window.location.reload()

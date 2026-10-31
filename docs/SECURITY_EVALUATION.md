@@ -60,6 +60,7 @@ docker compose exec -T postgres createdb -U travel_agent travel_agent_test
 cd backend
 export TEST_DATABASE_URL=postgresql+asyncpg://travel_agent:travel_agent@localhost:5432/travel_agent_test
 export DATABASE_URL="$TEST_DATABASE_URL"
+baml generate
 uv run alembic upgrade head
 uv run pytest -q
 uv run pyrefly check

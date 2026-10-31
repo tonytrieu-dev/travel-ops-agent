@@ -66,6 +66,8 @@ cp .env.example .env
 # postgresql+asyncpg://travel_agent:travel_agent@localhost:5432/travel_agent
 # Enforcement is already on by default; optionally set ZERO_TRUST_SIGNING_SECRET for stable tokens.
 cd backend
+uv sync
+baml generate
 uv run alembic upgrade head
 uv run python -m scripts.seed_security_demo
 uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
@@ -91,7 +93,9 @@ The [architecture findings and mini use case](docs/ZERO_TRUST_FINDINGS.md) prese
 the baseline, implemented changes, before/after evidence, and outstanding review issues.
 
 The synthetic accounts all use `demo-password` and the TOTP secret
-`JBSWY3DPEHPK3PXP` (the script calculates the current six-digit code). The demo shows a valid
+`JBSWY3DPEHPK3PXP` (the script calculates the current six-digit code).
+Each identity can consume a code only once; wait for the next 30-second code before
+repeating MFA sign-in, including when rerunning the demo. The demo shows a valid
 tenant-scoped request, MFA-gated operator access, token/session rejection,
 browser segment spoof rejection, denials triggering session revocation, and the
 security-operations event/incident query. These are throwaway demo credentials; never reuse them.
@@ -311,9 +315,17 @@ in the file's comments). Adjust `DATABASE_URL` if you're not using the Docker de
 
 ### 3. Backend
 
+Install the [BAML CLI](https://docs.boundaryml.com/guide/installation-language/python)
+and select toolchain 0.23.0 (`baml toolchain use 0.23.0`), matching the locked
+`baml-bridge` runtime. Add its bin directory to PATH. The generated `backend/baml_sdk/`
+is intentionally untracked: run `baml generate` before importing the app, migrations,
+or tests, and regenerate whenever `baml_src/` changes. The quick-start demo above
+also requires this CLI.
+
 ```bash
 cd backend
 uv sync
+baml generate
 uv run alembic upgrade head
 uv run uvicorn app.main:app --reload
 ```

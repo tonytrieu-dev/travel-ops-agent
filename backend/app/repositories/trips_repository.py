@@ -97,7 +97,10 @@ async def _invalidate_trip_derived_data(session: AsyncSession, trip_id: int) -> 
 
 
 async def update_trip(session: AsyncSession, trip_id: int, data: TripRequestUpdate) -> TripRequest:
-    trip = await session.get(TripRequest, trip_id)
+    trip = await session.scalar(
+        select(TripRequest).where(col(TripRequest.id) == trip_id)
+        .with_for_update().execution_options(populate_existing=True)
+    )
     if trip is None:
         raise TripError(ErrorCode.TRIP_NOT_FOUND, 404, f"No trip {trip_id}.")
 
@@ -249,7 +252,10 @@ async def persist_itinerary_if_current(
 ) -> bool:
     """Persist a freshly planned itinerary unless the trip's criteria changed since planning began.
     Idempotent: a replayed durable workflow re-persisting the same result is a no-op."""
-    trip = await session.get(TripRequest, trip_id)
+    trip = await session.scalar(
+        select(TripRequest).where(col(TripRequest.id) == trip_id)
+        .with_for_update().execution_options(populate_existing=True)
+    )
     if trip is None or _build_planner_prompt(trip) != planned_prompt:
         return False
     if await session.scalar(select(Itinerary).where(col(Itinerary.trip_request_id) == trip_id)):

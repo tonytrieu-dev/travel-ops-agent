@@ -15,11 +15,11 @@ from tests.db_helpers import TEST_DATABASE_URL, seed_trip
 
 # Captured before the client fixture patches the module attribute with the planner spy; this test
 # needs the genuine durable workflow so the FunctionModel's failure actually propagates.
-_REAL_RUN_PLANNER_WORKFLOW = dbos_runtime._run_planner_workflow
+_REAL_RUN_PLANNER_AGENT = dbos_runtime._run_planner_agent
 
 
 async def test_planner_failure_preserves_completed_exchanges(client, monkeypatch) -> None:
-    monkeypatch.setattr(dbos_runtime, "_run_planner_workflow", _REAL_RUN_PLANNER_WORKFLOW)
+    monkeypatch.setattr(dbos_runtime, "_run_planner_agent", _REAL_RUN_PLANNER_AGENT)
     engine = create_async_engine(TEST_DATABASE_URL)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     requests = 0

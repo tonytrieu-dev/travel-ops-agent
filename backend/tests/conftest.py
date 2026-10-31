@@ -244,7 +244,7 @@ def client(
     app.dependency_overrides[get_session] = _override_get_session
     monkeypatch.setattr("app.dbos_runtime.get_flight_provider", lambda settings: booking_options_spy)
     monkeypatch.setattr("app.routes.trips.get_flight_provider", lambda settings: flight_search_spy)
-    monkeypatch.setattr("app.dbos_runtime._run_planner_workflow", planner_spy)
+    monkeypatch.setattr("app.dbos_runtime._run_planner_agent", planner_spy)
     # Zero-trust is enforced by default in production; these legacy route tests predate the auth
     # boundary and exercise trip/booking/rate-limit behavior with unauthenticated requests, so
     # this fixture runs them unenforced. The enforced path has its own suite (test_security*.py).

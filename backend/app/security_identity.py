@@ -10,10 +10,11 @@ from datetime import UTC, timedelta
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
+from starlette.concurrency import run_in_threadpool
 
 from app import config
 from app.models import SecuritySession, User, utcnow
@@ -171,7 +172,19 @@ async def verify_session_mfa(
     user = await session.get(User, security_session.user_id)
     if user is None or user.disabled or not user.mfa_enabled or security_session.revoked_at is not None:
         return False
-    if not hmac.compare_digest(totp_code(user.totp_secret), code):
+    timestamp = int(time.time())
+    if not hmac.compare_digest(totp_code(user.totp_secret, timestamp), code):
+        return False
+    consumed = await session.scalar(
+        update(User).where(
+            col(User.id) == user.id,
+            col(User.disabled).is_(False),
+            col(User.mfa_enabled).is_(True),
+            or_(col(User.last_totp_time_step).is_(None), col(User.last_totp_time_step) < timestamp // 30),
+        ).values(last_totp_time_step=timestamp // 30).returning(col(User.id))
+    )
+    if consumed is None:
+        await session.rollback()
         return False
     security_session.mfa_verified = True
     assert user.id is not None
@@ -217,7 +230,7 @@ async def login_identity(
     session: AsyncSession, body: LoginRequest, request: Request
 ) -> TokenOut:
     user = await session.scalar(select(User).where(col(User.email) == body.email))
-    if user is None or user.disabled or user.device_id != body.device_id or not password_matches(user, body.password):
+    if user is None or user.disabled or user.device_id != body.device_id or not await run_in_threadpool(password_matches, user, body.password):
         await record_authentication_failure(
             reason="invalid credentials", tenant_id=user.tenant_id if user else None,
             resource=f"user:{user.id}" if user else "identity",
@@ -225,7 +238,7 @@ async def login_identity(
         )
         raise HTTPException(status_code=401, detail="invalid credentials")
     if "$" not in user.password_hash:
-        user.password_hash = password_hash(body.password)
+        user.password_hash = await run_in_threadpool(password_hash, body.password)
     security_session = await create_security_session(session, user, body.device_id)
     await record_security_event(
         session, None, action="auth.login", resource=f"user:{user.id}", decision="allow",

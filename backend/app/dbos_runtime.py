@@ -106,8 +106,7 @@ async def execute_booking_durable(log_id: int, trace_id: str | None = None) -> B
             return BookingLogOut.model_validate(booking)
 
 
-@DBOS.workflow(name="run_planner")
-async def _run_planner_workflow(trip_id: int, prompt: str, trace_id: str) -> PlannerOutput:
+async def _run_planner_agent(trip_id: int, prompt: str, trace_id: str) -> PlannerOutput:
     settings = get_settings()
     async with (
         get_session_factory()() as session,
@@ -171,6 +170,20 @@ async def _run_planner_workflow(trip_id: int, prompt: str, trace_id: str) -> Pla
     return result.output
 
 
+@DBOS.step(name="persist_itinerary")
+async def _persist_itinerary_step(trip_id: int, prompt: str, output: ItineraryOut) -> None:
+    async with get_session_factory()() as session:
+        await trips_repository.persist_itinerary_if_current(session, trip_id, prompt, output)
+
+
+@DBOS.workflow(name="run_planner")
+async def _run_planner_workflow(trip_id: int, prompt: str, trace_id: str) -> PlannerOutput:
+    output = await _run_planner_agent(trip_id, prompt, trace_id)
+    if isinstance(output, ItineraryOut):
+        await _persist_itinerary_step(trip_id, prompt, output)
+    return output
+
+
 async def run_planner_durable(trip_id: int, prompt: str, trace_id: str | None = None) -> PlannerOutput:
     """Not itself a DBOS workflow: the concurrency slot is plain in-process state, and acquiring
     it inside a replayable workflow body risks a double-acquire if DBOS re-enters that body
@@ -178,11 +191,6 @@ async def run_planner_durable(trip_id: int, prompt: str, trace_id: str | None = 
     the durable call from the outside instead."""
     await acquire_agent_run_slot()
     try:
-        output = await _run_planner_workflow(trip_id, prompt, trace_id or correlation_id())
+        return await _run_planner_workflow(trip_id, prompt, trace_id or correlation_id())
     finally:
         release_agent_run_slot()
-    # Persist here, inside the durable call, so a crash after it returns can't lose the itinerary.
-    if isinstance(output, ItineraryOut):
-        async with get_session_factory()() as session:
-            await trips_repository.persist_itinerary_if_current(session, trip_id, prompt, output)
-    return output

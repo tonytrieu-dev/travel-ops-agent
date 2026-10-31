@@ -58,8 +58,10 @@ test("a stale plan response does not overwrite the newly selected trip", async (
   fireEvent.click(view.getByText("Your trips"))
   await act(async () => fireEvent.click(view.getByText(/LHR/)))
   assert.match(view.container.textContent, /LHR/)
+  assert.equal(view.getByRole("button", { name: "Plan itinerary" }).disabled, false)
 
   // Trip 1's plan finally resolves needing clarification — it must not land on London.
   await act(async () => slowPlan.resolve(response({ status: "needs_clarification", questions: ["Which Tokyo?"] })))
   assert.doesNotMatch(view.container.textContent, /Which Tokyo\?/, "stale plan must not render under the new trip")
+  assert.equal(view.getByRole("button", { name: "Plan itinerary" }).disabled, false)
 })
