@@ -1,7 +1,29 @@
-// Mirrors backend/specs/openapi.yaml — the source of truth for this contract.
-// Keep field names and shapes exactly in sync with that file, not with assumptions.
+// Mirrors the backend's runtime request and response models.
+// Keep field names and shapes exactly in sync with the backend runtime models, not assumptions.
 
 export type FitnessLevel = "low" | "moderate" | "high"
+
+export interface ControlResultOut {
+  control: string
+  status: "pass" | "fail" | "insufficient_evidence"
+  summary: string
+  evidence_event_ids: number[]
+  details: Record<string, unknown>
+}
+
+export interface ComplianceAssessmentOut {
+  id: number
+  evaluator_version: string
+  window_start: string
+  window_end: string
+  assessed_at: string
+  results: ControlResultOut[]
+}
+
+export interface ComplianceMonitoringOut {
+  stale: boolean
+  assessments: ComplianceAssessmentOut[]
+}
 
 export type TripStatus = "created" | "flights_searched" | "itinerary_ready"
 
@@ -21,6 +43,8 @@ export type ErrorCode =
   | "validation_error"
   | "rate_limit_exceeded"
   | "connector_not_configured"
+  | "forbidden"
+  | "authentication_required"
 
 export interface ProblemDetail {
   code: ErrorCode

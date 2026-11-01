@@ -5,10 +5,11 @@ Every tunable the agent and adapters rely on lives here as a named constant — 
 numbers scattered through the codebase.
 """
 
+import secrets
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import SecretStr, computed_field
+from pydantic import Field, SecretStr, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Cerebras runs gpt-oss-120b directly and keeps clean JSON tool-calls for Pydantic AI.
@@ -79,8 +80,7 @@ FLIGHT_CACHE_TTL_MINUTES = 15
 LLM_INPUT_PRICE_PER_MILLION_TOKENS = 0.59
 LLM_OUTPUT_PRICE_PER_MILLION_TOKENS = 0.79
 
-# No auth yet: every request acts as this one fixed user. get_current_user() is the single seam
-# that will start resolving a real identity later — route handlers never read this directly.
+# The identity fallback is used only when security enforcement is disabled for development.
 DEMO_USER_EMAIL = "tonytrieu.dev@gmail.com"
 
 # Cap concurrent agent runs so a burst can't blow through the LLM provider's rate limits.
@@ -105,6 +105,16 @@ class Settings(BaseSettings):
 
     use_live_flight_api: bool = True
     frontend_origin: str = "http://localhost:5173"
+    # Zero-trust enforcement is the default posture — "never trust, always verify" is not a
+    # toggle. Set ZERO_TRUST_ENFORCED=false only for the legacy trip/booking tests that predate
+    # the auth boundary and exercise route behavior, not identity.
+    zero_trust_enforced: bool = True
+    # No explicit secret -> a fresh per-process key, so an out-of-the-box run is enforced AND
+    # unforgeable (nothing in the repo can sign a valid token). A real deployment sets an explicit
+    # secret so tokens survive a restart and are shared across processes.
+    zero_trust_signing_secret: SecretStr = Field(
+        default_factory=lambda: SecretStr(secrets.token_urlsafe(32))
+    )
 
     slack_bot_token: SecretStr | None = None
     slack_signing_secret: SecretStr | None = None
@@ -115,6 +125,16 @@ class Settings(BaseSettings):
     def dbos_database_url(self) -> str:
         """DBOS speaks the plain (psycopg/sync) Postgres URL, not the asyncpg dialect."""
         return self.database_url.replace("postgresql+asyncpg://", "postgresql://")
+
+    @model_validator(mode="after")
+    def _reject_weak_signing_secret(self) -> "Settings":
+        signing_secret = self.zero_trust_signing_secret.get_secret_value()
+        if self.zero_trust_enforced and len(signing_secret.encode()) < 32:
+            raise ValueError(
+                "ZERO_TRUST_SIGNING_SECRET must be at least 32 bytes when "
+                "ZERO_TRUST_ENFORCED is enabled"
+            )
+        return self
 
 
 @lru_cache

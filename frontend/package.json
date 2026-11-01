@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "test": "TZ=America/Los_Angeles node --test src/api/client.test.js src/hooks/usePolledResource.test.js src/components/test/security.test.js src/components/test/selection.test.js src/components/test/dates.test.js src/components/test/activity.test.js src/App.test.js",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview"
@@ -16,10 +17,12 @@
     "tailwindcss": "^4.3.3"
   },
   "devDependencies": {
+    "@testing-library/react": "^16.3.3",
     "@types/node": "^24.13.2",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",
+    "jsdom": "^26.1.0",
     "oxlint": "^1.71.0",
     "typescript": "~6.0.2",
     "vite": "^8.1.1"

@@ -41,6 +41,14 @@ function formatDate(value: string | null | undefined): string {
   return value ? new Date(value).toLocaleDateString() : "—"
 }
 
+// new Date("YYYY-MM-DD") is UTC midnight, which renders the day before in negative-offset zones;
+// parse the parts as a local calendar date instead.
+function formatDateOnly(value: string | null | undefined): string {
+  if (!value) return "—"
+  const [year, month, day] = value.split("-").map(Number)
+  return new Date(year, month - 1, day).toLocaleDateString()
+}
+
 export function YourTripsPanel({ trips, selectedTripId, onSelectTrip }: YourTripsPanelProps) {
   const [dateRange, setDateRange] = useState<DateRangeFilter>("all")
 
@@ -102,8 +110,8 @@ export function YourTripsPanel({ trips, selectedTripId, onSelectTrip }: YourTrip
                     >
                       {trip.origin} → {trip.destination_airport}
                     </td>
-                    <td className="px-4 py-3 text-slate-600">{formatDate(trip.depart_date)}</td>
-                    <td className="px-4 py-3 text-slate-600">{formatDate(trip.return_date)}</td>
+                    <td className="px-4 py-3 text-slate-600">{formatDateOnly(trip.depart_date)}</td>
+                    <td className="px-4 py-3 text-slate-600">{formatDateOnly(trip.return_date)}</td>
                     <td className="px-4 py-3 text-slate-600">{STATUS_LABELS[trip.status]}</td>
                     <td className="px-4 py-3 text-slate-500">{formatDate(trip.created_at)}</td>
                   </tr>

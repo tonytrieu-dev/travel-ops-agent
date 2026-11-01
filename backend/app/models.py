@@ -6,6 +6,7 @@ and no agent, can edit or delete a row once written.
 """
 
 from datetime import UTC, datetime
+from uuid import uuid4
 from enum import StrEnum
 from typing import Any
 
@@ -62,7 +63,95 @@ class User(SQLModel, table=True):
     # Nullable so a right-to-erasure request can null the email (anonymize) while leaving the
     # append-only audit rows, which reference user_id only, fully intact.
     email: str | None = Field(default=None, unique=True, index=True)
+    tenant_id: str = Field(default="demo-tenant", index=True)
+    role: str = Field(default="traveler")
+    device_id: str = Field(default="demo-device")
+    mfa_enabled: bool = Field(default=True)
+    disabled: bool = Field(default=False)
+    last_totp_time_step: int | None = Field(default=None)
+    totp_secret: str = Field(default="JBSWY3DPEHPK3PXP")
+    password_hash: str = Field(default="")
     created_at: datetime = Field(default_factory=utcnow)
+
+
+class SecuritySession(SQLModel, table=True):
+    __tablename__ = "security_session"
+
+    id: int | None = Field(default=None, primary_key=True)
+    session_id: str = Field(default_factory=lambda: uuid4().hex, unique=True, index=True)
+    user_id: int = Field(foreign_key="user_account.id", index=True)
+    tenant_id: str = Field(index=True)
+    device_id: str = Field(index=True)
+    mfa_verified: bool = False
+    expires_at: datetime
+    revoked_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class SecurityEvent(SQLModel, table=True):
+    """Append-only zero-trust decision record for monitoring and incident response."""
+
+    __tablename__ = "security_event"
+
+    id: int | None = Field(default=None, primary_key=True)
+    tenant_id: str = Field(index=True)
+    actor_user_id: int | None = Field(default=None, foreign_key="user_account.id", index=True)
+    session_id: str | None = Field(default=None, index=True)
+    device_id: str
+    source_segment: str
+    target_segment: str
+    action: str
+    resource: str
+    decision: str = Field(index=True)
+    reason: str
+    correlation_id: str = Field(index=True)
+    policy_version: str | None = None
+    enforcement_active: bool | None = None
+    actor_role: str | None = None
+    mfa_required: bool | None = None
+    mfa_verified: bool | None = None
+    related_event_ids: list[int] | None = Field(default=None, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class SecurityIncident(SQLModel, table=True):
+    __tablename__ = "security_incident"
+    __table_args__ = (
+        Index(
+            "uq_security_incident_open_session",
+            "tenant_id", "device_id", "session_id",
+            unique=True,
+            postgresql_where=text("status = 'open' AND session_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_security_incident_open_sessionless",
+            "tenant_id", "device_id",
+            unique=True,
+            postgresql_where=text("status = 'open' AND session_id IS NULL"),
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    tenant_id: str = Field(index=True)
+    actor_user_id: int | None = Field(default=None, foreign_key="user_account.id", index=True)
+    device_id: str = Field(index=True)
+    session_id: str | None = Field(default=None, index=True)
+    reason: str
+    status: str = Field(default="open", index=True)
+    trigger_event_id: int | None = Field(default=None, foreign_key="security_event.id")
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class ComplianceAssessment(SQLModel, table=True):
+    __tablename__ = "compliance_assessment"
+
+    id: int | None = Field(default=None, primary_key=True)
+    tenant_id: str = Field(index=True)
+    evaluator_version: str
+    window_start: datetime
+    window_end: datetime
+    assessed_at: datetime = Field(default_factory=utcnow)
+    results: list[dict[str, Any]] = Field(sa_column=Column(JSON))
 
 
 class TripRequest(SQLModel, table=True):
@@ -101,14 +190,12 @@ class FlightSearchResult(SQLModel, table=True):
 
 class Itinerary(SQLModel, table=True):
     __tablename__ = "itinerary"
-    # One itinerary per trip: the DB blocks a concurrent second generation from burning a second
-    # LLM run.
+    # One itinerary per trip. This blocks a duplicate row, not a second LLM run — planning is
+    # serialized by an advisory lock in get_or_create_itinerary.
     __table_args__ = (UniqueConstraint("trip_request_id", name="uq_itinerary_trip_request"),)
 
     id: int | None = Field(default=None, primary_key=True)
     trip_request_id: int = Field(foreign_key="trip_request.id", index=True)
-    # days: list of {day_number, summary, activities: [{name, description, intensity,
-    # source_url}]} — every activity carries the Tavily source_url that grounds it.
     days: list[dict[str, Any]] = Field(sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utcnow)
 
@@ -169,6 +256,7 @@ class BookingTransition(SQLModel, table=True):
     to_state: BookingState
     actor_user_id: int | None = Field(default=None, foreign_key="user_account.id")
     reason: str
+    correlation_id: str = Field(default_factory=lambda: uuid4().hex, index=True)
     created_at: datetime = Field(default_factory=utcnow)
 
 
@@ -188,6 +276,7 @@ class ExecutionEvent(SQLModel, table=True):
     detail: str
     duration_ms: int | None = None
     data: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    correlation_id: str = Field(default_factory=lambda: uuid4().hex, index=True)
     created_at: datetime = Field(default_factory=utcnow)
 
 

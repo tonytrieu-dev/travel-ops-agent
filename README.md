@@ -1,46 +1,145 @@
 # TravelOps Agent
 
-An AI travel-planning application that searches flight data, researches destination activities,
-and generates an age- and fitness-aware itinerary. Required trip fields are validated at intake,
-while ambiguous values can produce a clarifying question instead of an itinerary. A
-**human-in-the-loop** state machine keeps booking handoff outside the agent: the model can research
-and propose flights, but it has no tool that can approve or execute booking state changes.
+A bounded **zero-trust application prototype**, using a stateful travel planner as
+the protected resource. It demonstrates user/session verification, role and tenant
+access policy, privileged MFA, recorded security decisions, and automatic session
+containment. It is a first implementation toward the enterprise-network project
+objective; device authentication and network micro-segmentation remain gaps.
 
-> A small reference system for durable AI workflows: the planner is observable and replay-safe,
-> booking requires an explicit human decision, and every decision is persisted as an audit trail.
+The planner searches flights and destination activities and proposes an itinerary.
+Booking approval and execution stay outside the model's tools, behind application
+policy and a human-approval state machine. The system returns checkout links;
+it does not purchase flights.
+
+The [architecture findings](docs/ZERO_TRUST_FINDINGS.md) preserve the baseline,
+before/after evidence, design limits and three-scenario security demonstration.
+
+## Zero-trust architecture
+
+Zero-trust enforcement is **on by default** — every protected API route requires a short-lived
+bearer token, with no toggle to flip first. The local issuer uses custom HMAC-signed tokens,
+passwords, and TOTP; it does not implement OIDC discovery or standard OIDC token validation.
+With no `ZERO_TRUST_SIGNING_SECRET` set, the app generates a fresh per-process signing key; set an explicit secret
+for a deployment whose tokens must survive a restart. Production should put Keycloak or another
+OIDC provider in front of the API and use mTLS/service-mesh identity for internal traffic.
+
+The SPA signs in through `POST /api/auth/browser/login` and
+`POST /api/auth/browser/mfa`. The API sets a 15-minute HttpOnly, SameSite=Strict cookie;
+browser responses omit the bearer token. Requests include cookies, and browser writes
+must send the configured `FRONTEND_ORIGIN`. HTTPS is required outside loopback development;
+use the same site for the frontend and API so Strict cookies are sent. The original
+`/api/auth/login` and `/api/auth/mfa` endpoints remain available to bearer-token CLI clients.
+Set `ZERO_TRUST_SIGNING_SECRET` and use the seeded demo credentials or a
+local user; MFA-enabled users must complete the TOTP step. Connector settings are deployment-wide,
+not tenant-owned, and both reading and changing them require the `security-operator` or `admin` role
+plus verified MFA.
+
+Slack approval callbacks and notifications are disabled while enforcement is enabled, even
+with credentials configured. Slack users are not mapped to trip owners or verified application
+sessions; approve and cancel bookings in the app. The legacy Slack flow is development-only.
+
+Device IDs demonstrate consistency between submitted and stored identity attributes; they do not
+prove device possession or health. Segment checks enforce an application boundary, without
+network segmentation or workload authentication. See the [trust boundaries](docs/ARCHITECTURE.md#zero-trust-enterprise-network-overlay).
 
 ## Start here
 
 - [Architecture](#architecture) — the system boundary and critical request path.
+- [Zero Trust control plane](docs/ARCHITECTURE.md#zero-trust-enterprise-network-overlay) — how the
+  five required areas (identity and access management, MFA, segmentation, continuous monitoring,
+  incident response) map to concrete controls, and what is deliberately out of scope.
 - [Evaluation results](#evaluation-results) — 84/84 deterministic assertions passed in a 12-run
   sample; the optional quality judge passed 11/12.
+- [Zero-trust demo](#zero-trust-demo) — deterministic identities, MFA, attacks, containment, and
+  security-operations queries.
 - [Engineering decisions](docs/DECISIONS.md) — deeper rationale and trade-offs.
+- [Security evaluation](docs/SECURITY_EVALUATION.md) — PostgreSQL validation, repeatable scenarios,
+  and a modest local latency comparison.
 
 There is no public hosted demo yet. Run the local stack below, or use the walkthrough as a short
 recorded demo script. The project intentionally does not present itself as a production travel
-service: it has no authentication, does not purchase flights, and has not been load-tested or
-security-audited.
+service: it does not purchase flights and has not had production-scale load testing or an
+independent security audit.
 
-## Three-minute walkthrough
+## Zero-trust demo
 
-This is the shortest useful demo for a reviewer. It shows agent research, persisted execution,
-human approval, and audit history in one path.
+```bash
+docker compose up -d postgres
+cp .env.example .env
+# Set DATABASE_URL in .env to match the Docker service:
+# postgresql+asyncpg://travel_agent:travel_agent@localhost:5432/travel_agent
+# Enforcement is already on by default; optionally set ZERO_TRUST_SIGNING_SECRET for stable tokens.
+cd backend
+uv sync
+baml generate
+uv run alembic upgrade head
+uv run python -m scripts.seed_security_demo
+uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
 
-1. Enter `JFK` → `San Diego`, `2026-09-01` → `2026-09-08`, age `78`, fitness `low`. Create the
-   trip and click **Plan itinerary**.
-2. Open **Agent execution** while it runs. Show the two read-only tools (`search_flights` and
-   `web_search`), live events, persisted run status, tool results, token usage, and structured
-   output. The low-fitness case cannot contain a `high`-intensity activity.
-3. Select a flight and click **Review booking**. Pause at **Approve this flight**: the agent can
-   propose, but it has no tool that can mutate booking state. Click approval, then **Continue to
-   airline**. The app retrieves checkout links; it does not purchase or hold a fare.
-4. Open **Approval history**. Show the transition, actor email, reason, and timestamp read from
-   the append-only database trail.
-5. For recovery, stop the backend during planning and restart it. DBOS resumes from Postgres
-   checkpoints; completed Cerebras, flight, and activity steps are reused rather than re-issued.
+Keep that API terminal running. In a second terminal from the repository root:
 
-For a repeatable demo, use the recorded flight and activity providers where possible. The LLM
-call remains live.
+```bash
+cd backend
+uv run python -m scripts.security_demo
+```
+
+Stop API writers while applying migration `5d9f1b3c4e67`; deploy the updated API
+and frontend together. This migration clears fixed-salt password hashes and revokes their sessions.
+It preserves account ownership and modern password hashes. Cleared hashes cannot be
+restored by downgrade; those accounts must enroll a new password.
+For an existing account left with an empty password hash by a security migration,
+run `uv run python -m scripts.enroll_identity --email <existing-account-email>` from
+`backend`. A trusted local database operator must run this command. It prompts for
+and confirms a chosen password without placing it in command arguments. It refuses
+unknown, disabled, or already-enrolled accounts and preserves identity, trip ownership,
+device and MFA settings. It is enrollment, not a password-reset endpoint. Existing
+MFA enrollment must still be available to the owner; the migration's shared demo
+TOTP secret is suitable only for local synthetic accounts.
+
+The [architecture findings and mini use case](docs/ZERO_TRUST_FINDINGS.md) preserve
+the baseline, implemented changes, before/after evidence, and outstanding review issues.
+
+The synthetic accounts all use `demo-password` and the TOTP secret
+`JBSWY3DPEHPK3PXP` (the script calculates the current six-digit code).
+Each identity can consume a code only once; wait for the next 30-second code before
+repeating MFA sign-in, including when rerunning the demo. The demo shows a valid
+tenant-scoped request, MFA-gated operator access, token/session rejection,
+browser segment spoof rejection, denials triggering session revocation, and the
+security-operations event/incident query. These are throwaway demo credentials; never reuse them.
+
+For the repeatable PostgreSQL demonstration, including authorized booking, cross-tenant denial,
+tampered tokens, revocation, and completed planner exchanges retained after a later model failure, follow
+the [evaluation commands](docs/SECURITY_EVALUATION.md). That harness uses isolated test data and
+stubbed external providers; it does not purchase flights or consume model/search quota.
+Booking-options provider-failure preservation has no regression test and is not a validated guarantee.
+
+## Security demonstration
+
+Use three scenarios to show the bounded prototype:
+
+1. **Legitimate access:** a traveler completes MFA and reads an owned trip. A
+   password-only session cannot approve a booking.
+2. **Unauthorized access and containment:** a tenant-A traveler attempts to read
+   tenant B's booking. Five denied reads trigger session revocation; the next
+   protected request with that token returns 401.
+3. **Operator evidence:** an MFA-verified operator inspects the linked incident
+   and assessment evidence. Show pass, fail and insufficient evidence honestly;
+   a database-owner application role should fail the audit-protection assessment.
+
+The [findings document](docs/ZERO_TRUST_FINDINGS.md#presentation-scope-and-three-scenario-demonstration)
+maps these scenarios to actual tests and explains the before/after design. With
+an isolated PostgreSQL test database prepared as described in
+[Security evaluation](docs/SECURITY_EVALUATION.md#repeat-the-validation), run from `backend`:
+
+```bash
+uv run pytest -q tests/test_security_integration.py tests/test_compliance.py
+```
+
+These tests use synthetic accounts and stub external providers. They do not
+purchase flights or spend model/search quota. The standalone HTTP script above
+is a smaller missing-resource walkthrough; it does not cover the full
+cross-tenant assessment scenario. Browser rehearsal remains separate work.
 
 ## Architecture
 
@@ -55,8 +154,8 @@ flowchart LR
     DBOS[DBOS workflows] -.->|checkpoint and replay| Agent
     DBOS -.->|durable booking execute| Repo
     DBOS --> DB
-    API -->|optional| Slack[Slack approval connector]
-    Slack -->|signed callback| API
+    API -->|development only; enforcement off| Slack[Legacy Slack approval connector]
+    Slack -->|signed callback; enforcement off| API
 ```
 
 The critical boundary is deliberate: the LLM researches and proposes; deterministic application
@@ -108,8 +207,9 @@ Cancellation and fare expiry are terminal paths. Every legal transition is valid
 audit table is append-only at the database level: a Postgres trigger rejects updates and deletes.
 The UI's **Approval history** tab shows the booking, route, state transition, human actor, reason,
 and timestamp. Automatic expiry is distinguishable from a human decision because it has no actor.
-Slack is an optional signed approval channel; it can confirm or reject, but cannot bypass the
-state machine or purchase a ticket.
+With enforcement disabled for local development, the legacy Slack connector can confirm or reject
+through the same state machine. Enforcement disables this path because a Slack identity is not an
+authenticated application identity and cannot prove ownership, role, or MFA.
 
 ## Evaluation results
 
@@ -144,10 +244,13 @@ The detailed implementation notes remain in [ARCHITECTURE.md](docs/ARCHITECTURE.
 
 ## Project status and limitations
 
+Security monitoring now includes recurring MFA, audit-protection, and session-containment checks.
+See [implementation, findings, and demonstration steps](docs/COMPLIANCE_MONITORING.md).
+
 This is a portfolio and reference implementation intended for local development and evaluation.
-It is not a production travel service and has not been load tested or security audited. There is
-no authentication: every request currently uses the same demo account, so the application must
-not be exposed as an unrestricted public service. Activity citations show that a URL came from the
+It is not a production travel service; testing includes only modest local load, with no independent
+security audit. The local password/TOTP issuer and tenant/owner checks are bounded demonstration
+controls, not a production identity or device-management system. Activity citations show that a URL came from the
 configured search provider; they do not independently verify every generated claim. The booking
 flow returns third-party checkout links and does not reserve, purchase, or hold a fare.
 
@@ -220,9 +323,17 @@ in the file's comments). Adjust `DATABASE_URL` if you're not using the Docker de
 
 ### 3. Backend
 
+Install the [BAML CLI](https://docs.boundaryml.com/guide/installation-language/python)
+and select toolchain 0.23.0 (`baml toolchain use 0.23.0`), matching the locked
+`baml-bridge` runtime. Add its bin directory to PATH. The generated `backend/baml_sdk/`
+is intentionally untracked: run `baml generate` before importing the app, migrations,
+or tests, and regenerate whenever `baml_src/` changes. The quick-start demo above
+also requires this CLI.
+
 ```bash
 cd backend
 uv sync
+baml generate
 uv run alembic upgrade head
 uv run uvicorn app.main:app --reload
 ```
@@ -245,7 +356,14 @@ Frontend serves on `http://localhost:5173` (already whitelisted by the backend's
 cd backend
 uv run pytest -q
 uv run pyrefly check
+# The suite needs PostgreSQL; the subset that does not is marked and can run without it:
+uv run pytest -q -m no_database
 ```
+
+The zero-trust decision path (identity-claim verification, role/MFA policy, tenant ownership,
+browser segment spoofing, denial-threshold containment) is exercised against a live PostgreSQL
+instance by `tests/test_security.py`; the append-only audit guarantee is enforced by a database
+trigger and checked in `tests/test_append_only.py`.
 
 ### 6. Evals
 
@@ -263,10 +381,11 @@ overall itinerary correctness or traveler safety. The default suite is determini
 `--with-judge` opts into the Gemini `FitnessAppropriateness` evaluator. The planner model call is
 live in both modes, so running evals consumes Cerebras quota.
 
-### 7. (Optional) Slack human-in-the-loop approvals
+### 7. (Development only) Legacy Slack human-in-the-loop approvals
 
-Booking approval can be routed through Slack instead of the in-app UI. Slack's Interactivity
-callback needs a public HTTPS URL, so local development requires a tunnel:
+Only when `ZERO_TRUST_ENFORCED=false`, booking approval can be routed through Slack instead of the
+in-app UI. Slack's Interactivity callback needs a public HTTPS URL, so local development requires
+a tunnel:
 
 ```bash
 ngrok http 8000
@@ -274,8 +393,9 @@ ngrok http 8000
 
 Use the printed `https://*.ngrok.io` URL as the Slack app's Request URL. Full setup steps
 (app creation, tokens, channel config) are in [`docs/SLACK_SETUP.md`](docs/SLACK_SETUP.md).
-Nothing here is required for the app to run — without it, the Connectors tab shows the Slack
-toggle greyed out and booking approval stays in-app.
+Nothing here is required for the app to run. Under zero-trust enforcement the Connectors tab keeps
+the Slack toggle unavailable even when credentials are configured, and booking approval stays
+in-app.
 
 ## Key decisions
 

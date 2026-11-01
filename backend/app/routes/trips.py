@@ -10,16 +10,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.flights_searchapi import derive_flight_legs, get_flight_provider
 from app.agent.execution_log import execution_context
+from app import config
 from app.config import (
     LLM_INPUT_PRICE_PER_MILLION_TOKENS,
     LLM_OUTPUT_PRICE_PER_MILLION_TOKENS,
     MAX_CONTEXT_TOKENS,
-    get_settings,
 )
 from app.db import get_session
 from app.dbos_runtime import run_planner_durable
-from app.dependencies import get_current_user
-from app.models import AgentRun, AgentRunStep, ExecutionEvent, User
+from app.models import AgentRun, AgentRunStep, ExecutionEvent, TripRequest, User
 from app.rate_limit import enforce_request_rate_limit
 from app.repositories import trips_repository as repository
 from app.schemas import (
@@ -44,8 +43,15 @@ from app.schemas import (
     TripSnapshotOut,
 )
 from app.services.flight_search import FlightSearchService, flight_provider_name
+from app.security_admission import admit_collection_route, admit_trip_route
+from app.security_segment import enforce_api_segment
+from app.request_context import correlation_id
 
-router = APIRouter(prefix="/api", tags=["trips"])
+router = APIRouter(
+    prefix="/api",
+    tags=["trips"],
+    dependencies=[Depends(enforce_api_segment)],
+)
 
 _VALIDATION: dict[int | str, dict[str, Any]] = {422: {"model": ProblemDetail}}
 _NOT_FOUND: dict[int | str, dict[str, Any]] = {404: {"model": ProblemDetail}}
@@ -59,40 +65,49 @@ _NOT_FOUND_OR_RATE_LIMITED: dict[int | str, dict[str, Any]] = {
 }
 
 
-@router.post("/trips", response_model=TripRequestOut, responses=_VALIDATION)
+@router.post(
+    "/trips",
+    response_model=TripRequestOut,
+    responses=_VALIDATION,
+)
 async def create_trip(
     body: TripRequestCreate,
     session: AsyncSession = Depends(get_session),
-    user: User = Depends(get_current_user),
+    user: User = Depends(admit_collection_route("trip.create", "trip")),
 ) -> TripRequestOut:
-    assert user.id is not None, "get_current_user must always return a persisted user"
+    assert user.id is not None, "admit_collection_route always returns a persisted user"
     trip = await repository.create_trip(session, user.id, body)
     return TripRequestOut.model_validate(trip)
 
 
-@router.get("/trips", response_model=list[TripRequestOut])
+@router.get(
+    "/trips",
+    response_model=list[TripRequestOut],
+)
 async def list_trips(
     session: AsyncSession = Depends(get_session),
-    user: User = Depends(get_current_user),
+    user: User = Depends(admit_collection_route("trip.read", "trips")),
 ) -> list[TripRequestOut]:
-    assert user.id is not None, "get_current_user must always return a persisted user"
+    assert user.id is not None, "admit_collection_route always returns a persisted user"
     trips = await repository.list_trips(session, user.id)
     return [TripRequestOut.model_validate(trip) for trip in trips]
 
 
 @router.get("/trips/{trip_id}", response_model=TripRequestOut, responses=_NOT_FOUND)
-async def get_trip(
-    trip_id: int, session: AsyncSession = Depends(get_session)
-) -> TripRequestOut:
-    trip = await repository.get_trip(session, trip_id)
+async def get_trip(trip: TripRequest = Depends(admit_trip_route("trip.read"))) -> TripRequestOut:
     return TripRequestOut.model_validate(trip)
 
 
 @router.patch(
-    "/trips/{trip_id}", response_model=TripRequestOut, responses=_NOT_FOUND_OR_VALIDATION
+    "/trips/{trip_id}",
+    response_model=TripRequestOut,
+    responses=_NOT_FOUND_OR_VALIDATION,
+    dependencies=[Depends(admit_trip_route("trip.update"))],
 )
 async def update_trip(
-    trip_id: int, body: TripRequestUpdate, session: AsyncSession = Depends(get_session)
+    trip_id: int,
+    body: TripRequestUpdate,
+    session: AsyncSession = Depends(get_session),
 ) -> TripRequestOut:
     trip = await repository.update_trip(session, trip_id, body)
     return TripRequestOut.model_validate(trip)
@@ -104,9 +119,15 @@ def _to_flight_offer_out(offer: Any) -> FlightOfferOut:
     return offer_out
 
 
-@router.get("/trips/{trip_id}/snapshot", response_model=TripSnapshotOut, responses=_NOT_FOUND)
+@router.get(
+    "/trips/{trip_id}/snapshot",
+    response_model=TripSnapshotOut,
+    responses=_NOT_FOUND,
+    dependencies=[Depends(admit_trip_route("trip.read"))],
+)
 async def get_trip_snapshot(
-    trip_id: int, session: AsyncSession = Depends(get_session)
+    trip_id: int,
+    session: AsyncSession = Depends(get_session),
 ) -> TripSnapshotOut:
     trip, offers, itinerary, is_stale = await repository.get_trip_snapshot(session, trip_id)
     return TripSnapshotOut(
@@ -127,12 +148,15 @@ async def get_trip_snapshot(
     "/trips/{trip_id}/flights/search",
     response_model=FlightSearchOut,
     responses=_NOT_FOUND_OR_RATE_LIMITED,
-    dependencies=[Depends(enforce_request_rate_limit)],
+    dependencies=[
+        Depends(admit_trip_route("flight.search")),
+        Depends(enforce_request_rate_limit),
+    ],
 )
 async def search_trip_flights(
     trip_id: int, session: AsyncSession = Depends(get_session)
 ) -> FlightSearchOut:
-    provider = get_flight_provider(get_settings())
+    provider = get_flight_provider(config.get_settings())
     await repository.get_trip(session, trip_id)
     async with execution_context(
         session, trip_id, run_model=flight_provider_name(provider)
@@ -149,10 +173,18 @@ async def search_trip_flights(
     "/trips/{trip_id}/plan",
     response_model=PlanOut,
     responses=_NOT_FOUND_OR_RATE_LIMITED,
-    dependencies=[Depends(enforce_request_rate_limit)],
+    dependencies=[
+        Depends(admit_trip_route("trip.plan")),
+        Depends(enforce_request_rate_limit),
+    ],
 )
-async def plan_trip(trip_id: int, session: AsyncSession = Depends(get_session)) -> PlanOut:
-    output = await repository.get_or_create_itinerary(session, trip_id, run_planner_durable)
+async def plan_trip(
+    trip_id: int,
+    session: AsyncSession = Depends(get_session),
+) -> PlanOut:
+    output = await repository.get_or_create_itinerary(
+        session, trip_id, lambda trip_id, prompt: run_planner_durable(trip_id, prompt, correlation_id())
+    )
     if isinstance(output, PlanTooComplexOut):
         return output
     if isinstance(output, ClarificationOut):
@@ -197,20 +229,30 @@ def _to_panel_out(
     )
 
 
-@router.get("/trips/{trip_id}/execution", response_model=ExecutionPanelOut, responses=_NOT_FOUND)
+@router.get(
+    "/trips/{trip_id}/execution",
+    response_model=ExecutionPanelOut,
+    responses=_NOT_FOUND,
+    dependencies=[Depends(admit_trip_route("trip.execution.read"))],
+)
 async def get_trip_execution(
-    trip_id: int, session: AsyncSession = Depends(get_session)
+    trip_id: int,
+    session: AsyncSession = Depends(get_session),
 ) -> ExecutionPanelOut:
     runs_with_details, events = await repository.get_execution_panel(session, trip_id)
     return _to_panel_out(trip_id, runs_with_details, events)
 
 
-@router.get("/execution", response_model=GlobalExecutionPanelOut)
+@router.get(
+    "/execution",
+    response_model=GlobalExecutionPanelOut,
+    responses={403: {"model": ProblemDetail}},
+)
 async def get_all_execution(
     session: AsyncSession = Depends(get_session),
-    user: User = Depends(get_current_user),
+    user: User = Depends(admit_collection_route("trip.read", "execution")),
 ) -> GlobalExecutionPanelOut:
-    assert user.id is not None, "get_current_user must always return a persisted user"
+    assert user.id is not None, "admit_collection_route always returns a persisted user"
     runs_with_details = await repository.list_execution_runs_for_user(session, user.id)
     return GlobalExecutionPanelOut(
         agent_runs=[

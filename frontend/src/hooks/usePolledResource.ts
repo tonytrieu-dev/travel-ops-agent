@@ -1,53 +1,91 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { ApiError, getSessionId } from "../api/client.ts"
+import { useEffect, useRef, useState } from "react"
 
-const IDLE_POLL_MS = 4_000
 const ACTIVE_POLL_MS = 700
 
 interface PolledResourceOptions<T> {
-  fetcher: (() => Promise<T>) | null
+  fetcher: () => Promise<T>
   isRunActive: boolean
-  enabled?: boolean
+  /** Idle refresh cadence for resources that genuinely change without an active run. */
+  idlePollMs?: number
+  resourceKey: string
   /** Shown verbatim on failure, so each caller names what it was actually loading. */
   errorText: string
+}
+
+let deniedSessionId: string | null = null
+const deniedResourceKeys = new Set<string>()
+
+function isDeniedForCurrentSession(resourceKey: string): boolean {
+  const sessionId = getSessionId()
+  if (sessionId !== deniedSessionId) {
+    deniedSessionId = sessionId
+    deniedResourceKeys.clear()
+  }
+  return sessionId !== null && deniedResourceKeys.has(resourceKey)
 }
 
 interface PolledResourceState<T> {
   data: T | null
   errorMessage: string | null
-  refresh: () => Promise<void>
 }
 
-/** A null fetcher means nothing to poll yet (no trip selected), distinct from `enabled: false`. */
 export function usePolledResource<T>({
   fetcher,
   isRunActive,
-  enabled = true,
+  idlePollMs,
+  resourceKey,
   errorText,
 }: PolledResourceOptions<T>): PolledResourceState<T> {
   const [data, setData] = useState<T | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   // Skip a tick if a request is still in flight, so the 700ms poll can't stack overlaps.
   const isFetchingRef = useRef(false)
-
-  const refresh = useCallback(async () => {
-    if (fetcher === null || isFetchingRef.current) return
-    isFetchingRef.current = true
-    try {
-      setData(await fetcher())
-      setErrorMessage(null)
-    } catch {
-      setErrorMessage(errorText)
-    } finally {
-      isFetchingRef.current = false
-    }
-  }, [fetcher, errorText])
+  const pendingRefresh = useRef<(() => void) | null>(null)
 
   useEffect(() => {
-    if (!enabled || fetcher === null) return
-    refresh()
-    const interval = setInterval(refresh, isRunActive ? ACTIVE_POLL_MS : IDLE_POLL_MS)
-    return () => clearInterval(interval)
-  }, [enabled, fetcher, isRunActive, refresh])
+    let current = true
+    const refresh = async () => {
+      if (!current || isFetchingRef.current) return
+      if (isDeniedForCurrentSession(resourceKey)) {
+        setErrorMessage(errorText)
+        return
+      }
+      const sessionId = getSessionId()
+      isFetchingRef.current = true
+      try {
+        const result = await fetcher()
+        if (!current || sessionId !== getSessionId()) return
+        setData(result)
+        setErrorMessage(null)
+      } catch (error) {
+        if (!current || sessionId !== getSessionId()) return
+        if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+          if (sessionId !== null) {
+            deniedSessionId = sessionId
+            deniedResourceKeys.add(resourceKey)
+          }
+        }
+        setErrorMessage(errorText)
+      } finally {
+        isFetchingRef.current = false
+        const pending = pendingRefresh.current
+        pendingRefresh.current = null
+        pending?.()
+      }
+    }
+    setData(null)
+    setErrorMessage(null)
+    if (isFetchingRef.current) pendingRefresh.current = refresh
+    else void refresh()
+    const pollMs = isRunActive ? ACTIVE_POLL_MS : idlePollMs
+    const interval = pollMs === undefined ? undefined : setInterval(refresh, pollMs)
+    return () => {
+      current = false
+      if (pendingRefresh.current === refresh) pendingRefresh.current = null
+      clearInterval(interval)
+    }
+  }, [fetcher, errorText, resourceKey, idlePollMs, isRunActive])
 
-  return { data, errorMessage, refresh }
+  return { data, errorMessage }
 }

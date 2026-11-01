@@ -94,24 +94,17 @@ allow_cross_trip_cache=True`); the planner's tool call is deliberately more cons
 planning run, not a user-facing catalog browse — see the entry right below for where that shared
 logic actually lives.
 
-## Flight search and execution-run lifecycle are extracted services, not inline route/tool logic
-`FlightSearchService` (`app/services/flight_search.py`) and `ExecutionService`/`ExecutionRun`
-(`app/agent/execution_log.py`) sit behind `POST /api/trips/{trip_id}/flights/search`, the
-planner's `search_flights` tool, and the DBOS-wrapped planner run. **Alternative:** leave the
-caching, persistence, and ordering logic inline in `routes/trips.py` and `agent/planner.py`, as it
-originally was. **Rejected** — the
+## Flight search is an extracted service, not duplicated route/tool logic
+`FlightSearchService` (`app/services/flight_search.py`) sits behind
+`POST /api/trips/{trip_id}/flights/search` and the planner's `search_flights` tool.
+**Alternative:** leave the caching, persistence, and ordering logic inline in `routes/trips.py`
+and `agent/planner.py`, as it originally was. **Rejected** — the
 route and the planner tool need the *same* cheapest-first/cache/round-trip-completeness behavior
 (same-trip TTL reuse, cross-trip identical-search reuse, explicit unavailable results) and had
 drifted into two near-duplicate implementations; one service parameterized by
 `persist`/`allow_cross_trip_cache` is the single place that logic can be verified once
 (`test_route_and_planner_tool_modes_agree_on_offer_ordering_and_shape` pins the two callers can't
-silently diverge again). Same reasoning for `ExecutionService`: before the extraction, the DBOS
-workflow and its failure-path cleanup had two separate ways to finalize an `AgentRun`
-(`persist_agent_run` called directly from two branches); `ExecutionRun.persist_result` is now the
-one path, so `_persist_failed_run` and the success path can't fall out of sync on what "finalized"
-means. Both extractions were scoped to change no observable behavior — the full plan and
-task-by-task TDD trail live in
-`docs/superpowers/plans/2026-07-24-flight-search-execution-services.md`.
+silently diverge again).
 
 ## The agent has only two read-only tools
 Only `search_flights` and `web_search` are registered on the planner, both with strict JSON
@@ -218,6 +211,10 @@ local development. `ngrok http 8000` is the tunnel used for this (see `docs/SLAC
 no code depends on ngrok specifically, any HTTPS tunnel pointed at port 8000 works the same way.
 
 ## Slack approve only confirms; execute stays in the frontend
+This legacy flow is development-only. Security enforcement disables Slack callbacks and
+notifications because a workspace signature does not authorize the clicking user to mutate
+another traveler's booking. Approvals use the app's ownership, role, and MFA checks instead.
+
 The Slack callback (`routes/slack.py`) calls only `confirm_booking`/`reject_booking`, never
 `execute_booking`. **Alternative:** let Approve in Slack also execute the booking.
 **Rejected** — Slack requires an ack within 3 seconds, and execute calls SearchApi and can take up
@@ -240,7 +237,7 @@ with the env vars set would silently start posting to Slack; the toggle lets an 
 Slack once and still flip it off at runtime without a restart or an env change.
 
 ## Trip history is a list endpoint plus a global execution feed, not per-trip-only
-`GET /api/trips` lists every trip the (single demo) user owns, newest first; `GET /api/execution`
+`GET /api/trips` lists every trip the authenticated user owns, newest first; `GET /api/execution`
 mirrors that scoping across every `AgentRun` those trips own, also newest first — both live in
 `trips_repository.py` next to the existing per-trip `get_trip`/`get_execution_panel`, sharing the
 same user-scoping query rather than introducing a second concept. **Why global execution, not just
@@ -268,9 +265,14 @@ responds. This limiter reduces that risk for one running process; it resets on r
 a distributed quota-control mechanism.
 
 ## Current scope and deferred work
-HITL booking is a checkout-link handoff, not a purchase. The optional Slack connector supports one
-workspace and one approval interaction rather than a general chat-platform abstraction.
+HITL booking is a checkout-link handoff, not a purchase. The legacy development-only Slack
+connector supports one workspace and one approval interaction rather than a general chat-platform
+abstraction.
 
-Not implemented: authentication, multi-user isolation, payment processing, episodic/semantic/
+The security extension adds local password/TOTP authentication, server-backed sessions, and
+application-level tenant/owner checks. Device attestation and network segmentation are not
+implemented; see the trust boundaries in [ARCHITECTURE.md](ARCHITECTURE.md#zero-trust-enterprise-network-overlay).
+
+Not implemented: production identity-provider integration, payment processing, episodic/semantic/
 procedural agent memory, or Saga compensation for a multi-step airline booking. Some code boundaries
 could support those changes, but their implementation effort and behavior have not been validated.

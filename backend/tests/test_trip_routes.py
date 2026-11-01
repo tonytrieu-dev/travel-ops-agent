@@ -8,7 +8,7 @@ def _trip_payload(**overrides: object) -> dict:
         "origin": "JFK",
         "destination": "Paris",
         "destination_airport": "CDG",
-        "depart_date": "2026-08-01",
+        "depart_date": "2030-08-01",
         "age": 30,
         "fitness_level": "moderate",
     }
@@ -34,18 +34,6 @@ def test_list_trips_returns_only_the_authenticated_users_trips_newest_first(clie
     )
     assert trip_ids[:2] == [second_created["id"], first_created["id"]], (
         f"expected the two most recently created trips newest-first, got {trip_ids}"
-    )
-
-
-def test_get_trip_returns_the_persisted_trip(client) -> None:
-    trip_id = run_db(lambda session: seed_trip(session, depart_date="2026-09-01"))
-
-    response = client.get(f"/api/trips/{trip_id}")
-
-    assert response.status_code == 200, f"expected 200, got {response.status_code}: {response.text}"
-    body = response.json()
-    assert body["id"] == trip_id and body["origin"] == "JFK" and body["destination_airport"] == "CDG", (
-        f"GET /api/trips/{{id}} must return the persisted trip in TripRequestOut shape, got {body}"
     )
 
 

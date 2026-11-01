@@ -8,6 +8,7 @@ from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col, select
 
@@ -17,6 +18,7 @@ from app.models import (
     AgentRunStep,
     ExecutionEvent,
     FlightSearchResult,
+    HITLBookingLog,
     Itinerary,
     TripRequest,
     TripStatus,
@@ -76,6 +78,7 @@ async def list_trips(session: AsyncSession, user_id: int) -> list[TripRequest]:
 # Changing any of these invalidates a trip's flight search and itinerary: the stored offers were
 # priced for the old route/dates, and the itinerary was researched for the old destination.
 _CRITERIA_FIELDS = ("origin", "destination", "destination_airport", "depart_date", "return_date")
+_ITINERARY_CRITERIA_FIELDS = (*_CRITERIA_FIELDS, "age", "fitness_level")
 
 
 async def _invalidate_trip_derived_data(session: AsyncSession, trip_id: int) -> None:
@@ -94,12 +97,30 @@ async def _invalidate_trip_derived_data(session: AsyncSession, trip_id: int) -> 
 
 
 async def update_trip(session: AsyncSession, trip_id: int, data: TripRequestUpdate) -> TripRequest:
-    trip = await session.get(TripRequest, trip_id)
+    trip = await session.scalar(
+        select(TripRequest).where(col(TripRequest.id) == trip_id)
+        .with_for_update().execution_options(populate_existing=True)
+    )
     if trip is None:
         raise TripError(ErrorCode.TRIP_NOT_FOUND, 404, f"No trip {trip_id}.")
 
-    criteria_before = {field_name: getattr(trip, field_name) for field_name in _CRITERIA_FIELDS}
-    for field_name, value in data.model_dump(exclude_unset=True).items():
+    criteria_before = {field_name: getattr(trip, field_name) for field_name in _ITINERARY_CRITERIA_FIELDS}
+    patch = data.model_dump(exclude_unset=True)
+    route_changed = any(
+        field_name in patch and patch[field_name] != criteria_before[field_name]
+        for field_name in _CRITERIA_FIELDS
+    )
+    # A booking references an offer by foreign key; deleting the offer to invalidate it would
+    # break the FK and destroy audit history. Reject before any mutation.
+    if route_changed and await _trip_has_booking(session, trip_id):
+        raise TripError(
+            ErrorCode.INVALID_TRANSITION,
+            409,
+            "This trip has a booking tied to its flight offers; cancel it or start a new trip "
+            "before changing the route or dates.",
+        )
+
+    for field_name, value in patch.items():
         setattr(trip, field_name, value)
 
     try:
@@ -114,9 +135,22 @@ async def update_trip(session: AsyncSession, trip_id: int, data: TripRequestUpda
     if criteria_changed:
         await _invalidate_trip_derived_data(session, trip_id)
         trip.status = TripStatus.CREATED
+    elif any(getattr(trip, field_name) != criteria_before[field_name] for field_name in _ITINERARY_CRITERIA_FIELDS):
+        itinerary = await session.scalar(select(Itinerary).where(col(Itinerary.trip_request_id) == trip_id))
+        if itinerary is not None:
+            await session.delete(itinerary)
+        trip.status = TripStatus.CREATED
 
     await session.commit()
     return trip
+
+
+async def _trip_has_booking(session: AsyncSession, trip_id: int) -> bool:
+    return (
+        await session.scalar(
+            select(HITLBookingLog.id).where(col(HITLBookingLog.trip_request_id) == trip_id).limit(1)
+        )
+    ) is not None
 
 
 def cheapest_first(offers: list[FlightSearchResult]) -> list[FlightSearchResult]:
@@ -181,6 +215,11 @@ async def get_or_create_itinerary(
     if trip is None:
         raise TripError(ErrorCode.TRIP_NOT_FOUND, 404, f"No trip {trip_id}.")
 
+    # Serialize planning per trip: a concurrent /plan waits here, then finds the itinerary the
+    # first run persisted below and skips a second LLM run. Advisory (not a trip-row lock) because
+    # record_event locks the trip row per step and would deadlock against a held row lock.
+    await session.execute(text("SELECT pg_advisory_xact_lock(:trip_id)"), {"trip_id": trip_id})
+
     existing = await session.scalar(
         select(Itinerary).where(col(Itinerary.trip_request_id) == trip_id)
     )
@@ -191,12 +230,40 @@ async def get_or_create_itinerary(
     if isinstance(output, ClarificationOut | PlanTooComplexOut):
         return output
 
-    session.add(
-        Itinerary(trip_request_id=trip_id, days=[day.model_dump() for day in output.days])
+    # run_planner persists the itinerary inside its durable workflow (so a crash can't lose it) and
+    # skips persistence if the trip's criteria changed mid-run; an absent row means the plan is now
+    # obsolete. The advisory lock is still held, so the re-read serializes against a concurrent plan.
+    persisted = await session.scalar(
+        select(Itinerary)
+        .where(col(Itinerary.trip_request_id) == trip_id)
+        .execution_options(populate_existing=True)
     )
+    if persisted is None:
+        raise TripError(
+            ErrorCode.INVALID_TRANSITION,
+            409,
+            "The trip changed while it was being planned; plan it again for the new details.",
+        )
+    return ItineraryOut(days=persisted.days)
+
+
+async def persist_itinerary_if_current(
+    session: AsyncSession, trip_id: int, planned_prompt: str, output: ItineraryOut
+) -> bool:
+    """Persist a freshly planned itinerary unless the trip's criteria changed since planning began.
+    Idempotent: a replayed durable workflow re-persisting the same result is a no-op."""
+    trip = await session.scalar(
+        select(TripRequest).where(col(TripRequest.id) == trip_id)
+        .with_for_update().execution_options(populate_existing=True)
+    )
+    if trip is None or _build_planner_prompt(trip) != planned_prompt:
+        return False
+    if await session.scalar(select(Itinerary).where(col(Itinerary.trip_request_id) == trip_id)):
+        return True
+    session.add(Itinerary(trip_request_id=trip_id, days=[day.model_dump() for day in output.days]))
     trip.status = TripStatus.ITINERARY_READY
     await session.commit()
-    return output
+    return True
 
 
 async def _execution_runs_for_trips(

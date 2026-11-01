@@ -12,18 +12,51 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import SLACK_API_TIMEOUT_SECONDS, Settings
-from app.models import FlightSearchResult, HITLBookingLog, TripRequest
+from app.models import ConnectorSetting, FlightSearchResult, HITLBookingLog, TripRequest
 from app.repositories import booking_repository as repository
 from app.repositories.booking_repository import BookingError
+from app import security_posture as posture
 
 logger = logging.getLogger(__name__)
 
 SLACK_SIGNATURE_MAX_AGE_SECONDS = 5 * 60
 _APPROVE_ACTION_ID = "approve_booking"
 _REJECT_ACTION_ID = "reject_booking"
+
+
+def slack_configured(settings: Settings) -> bool:
+    # Legacy dev-only connector: a Slack identity cannot prove the zero-trust claims (tenant,
+    # role, MFA, device) a protected action requires, so it is disabled whenever enforcement —
+    # the primary posture — is on. It is not a path to enforced approvals; in-app approval is.
+    return bool(
+        not posture.enforcement_active()
+        and settings.slack_bot_token
+        and settings.slack_signing_secret
+        and settings.slack_approvals_channel_id
+    )
+
+
+async def connector_setting_row(session: AsyncSession) -> ConnectorSetting:
+    row = await session.scalar(select(ConnectorSetting))
+    if row is None:
+        row = ConnectorSetting()
+        session.add(row)
+        await session.commit()
+    return row
+
+
+async def slack_notifications_enabled(session: AsyncSession, settings: Settings) -> bool:
+    """The single definition of "should we post to Slack": configured on this deployment
+    *and* toggled on in ``connector_setting`` — every caller shares this instead of
+    re-deriving the pair independently."""
+    if not slack_configured(settings):
+        return False
+    row = await connector_setting_row(session)
+    return row.slack_enabled
 
 
 def _format_local_flight_time(raw: str) -> str:

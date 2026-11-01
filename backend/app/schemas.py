@@ -1,8 +1,4 @@
-"""API request/response models — the strictly-typed boundary between HTTP and the domain.
-
-These mirror the authored contract in specs/openapi.yaml; test_openapi_contract asserts the
-runtime schema FastAPI generates from them stays in sync with that file.
-"""
+"""API request/response models — the source of truth for HTTP validation and OpenAPI generation."""
 
 import re
 from datetime import UTC, date, datetime
@@ -21,6 +17,13 @@ from pydantic import (
 
 from app.models import AgentStepKind, ExecutionEventKind, FitnessLevel, TripStatus
 from app.state import BookingState
+
+# The planner's LLM-output schema is defined once in BAML (baml_src/travel_planner.baml) and
+# generated into baml_sdk. Re-exported here so the API/response layer keeps one import site.
+from baml_sdk import ActivityOut as ActivityOut
+from baml_sdk import ClarificationOut as ClarificationOut
+from baml_sdk import ItineraryDayOut as ItineraryDayOut
+from baml_sdk import ItineraryOut as ItineraryOut
 
 # Server timestamps are stored naive-UTC; serialize them with a +00:00 offset so a client doesn't
 # misread them as local time (which skewed the booking countdown by the viewer's UTC offset).
@@ -58,6 +61,8 @@ class ErrorCode(StrEnum):
     VALIDATION_ERROR = "validation_error"
     RATE_LIMIT_EXCEEDED = "rate_limit_exceeded"
     CONNECTOR_NOT_CONFIGURED = "connector_not_configured"
+    FORBIDDEN = "forbidden"
+    AUTHENTICATION_REQUIRED = "authentication_required"
 
 
 def validate_trip_dates(depart_date: str, return_date: str | None) -> None:
@@ -115,6 +120,7 @@ class BookingTransitionOut(BaseModel):
     from_state: BookingState
     to_state: BookingState
     reason: str
+    correlation_id: str
     actor_user_id: int | None = None
     # Resolved for display so an audit reader sees who decided, not a raw foreign key. Null for a
     # system action (a TTL expiry has no actor) and for an anonymized user, whose audit rows
@@ -137,29 +143,6 @@ class BookingLogOut(BaseModel):
     executed_at: UtcDatetime | None = None
     created_at: UtcDatetime
     transitions: list[BookingTransitionOut] = Field(default_factory=list)
-
-
-class ActivityOut(BaseModel):
-    name: str
-    description: str
-    # Closed vocabulary: free text here ("low to moderate (tram seated)") defeats every
-    # downstream safety check, so reject it at parse time and let pydantic-ai retry.
-    intensity: Literal["low", "moderate", "high"]
-    source_url: str
-
-
-class ItineraryDayOut(BaseModel):
-    day_number: int
-    summary: str
-    activities: list[ActivityOut]
-
-
-class ItineraryOut(BaseModel):
-    days: list[ItineraryDayOut]
-
-
-class ClarificationOut(BaseModel):
-    questions: list[str]
 
 
 class TripRequestCreate(BaseModel):
@@ -333,6 +316,7 @@ class ExecutionEventOut(BaseModel):
     detail: str
     duration_ms: int | None = None
     data: dict[str, Any] | None = None
+    correlation_id: str
     created_at: UtcDatetime
 
 
@@ -369,3 +353,94 @@ class GlobalExecutionPanelOut(BaseModel):
 
 class SlackAuthErrorOut(BaseModel):
     detail: str
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(max_length=254)
+    device_id: str = Field(min_length=1, max_length=100)
+    password: str = Field(min_length=1, max_length=200)
+
+
+class MfaVerifyRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    code: str = Field(pattern=r"^[0-9]{6}$")
+
+
+class BrowserLoginOut(BaseModel):
+    expires_at: UtcDatetime
+    session_id: str
+    mfa_required: bool
+
+
+class TokenOut(BrowserLoginOut):
+    access_token: str
+    token_type: Literal["Bearer"] = "Bearer"
+
+
+class SecurityEventOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    tenant_id: str
+    actor_user_id: int | None
+    device_id: str
+    session_id: str | None
+    source_segment: str
+    target_segment: str
+    action: str
+    resource: str
+    decision: str
+    reason: str
+    correlation_id: str
+    created_at: UtcDatetime
+    policy_version: str | None
+    enforcement_active: bool | None
+    actor_role: str | None
+    mfa_required: bool | None
+    mfa_verified: bool | None
+    related_event_ids: list[int] | None
+
+
+class SecurityIncidentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    tenant_id: str
+    actor_user_id: int | None
+    device_id: str
+    session_id: str | None
+    reason: str
+    status: str
+    created_at: UtcDatetime
+    trigger_event_id: int | None
+
+
+class SecurityEventQuery(BaseModel):
+    actor_user_id: int | None = None
+    decision: Literal["allow", "deny"] | None = None
+    action: str | None = None
+    since: datetime | None = None
+
+
+class ControlResultOut(BaseModel):
+    control: str
+    status: Literal["pass", "fail", "insufficient_evidence"]
+    summary: str
+    evidence_event_ids: list[int] = Field(default_factory=list)
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class ComplianceAssessmentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    evaluator_version: str
+    window_start: UtcDatetime
+    window_end: UtcDatetime
+    assessed_at: UtcDatetime
+    results: list[ControlResultOut]
+
+
+class ComplianceMonitoringOut(BaseModel):
+    stale: bool
+    assessments: list[ComplianceAssessmentOut]

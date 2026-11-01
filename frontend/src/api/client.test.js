@@ -1,0 +1,120 @@
+import test from "node:test"
+import assert from "node:assert/strict"
+
+import {
+  AUTHENTICATION_REQUIRED_EVENT,
+  getSessionId,
+  listTrips,
+  login,
+  verifyMfa,
+} from "./client.ts"
+
+const TOKEN_KEY = "travel-agent.verifiedAccessToken"
+const EXPIRATION_KEY = "travel-agent.verifiedAccessTokenExpiresAt"
+
+class MemoryStorage {
+  values = new Map()
+
+  getItem(key) {
+    return this.values.get(key) ?? null
+  }
+
+  setItem(key, value) {
+    this.values.set(key, String(value))
+  }
+
+  removeItem(key) {
+    this.values.delete(key)
+  }
+}
+
+globalThis.localStorage = new MemoryStorage()
+globalThis.window = new EventTarget()
+
+test("a protected 401 clears credentials and announces that sign-in is required", async () => {
+  globalThis.fetch = async (url, options) => {
+    assert.equal(options.credentials, "include")
+    assert.equal(options.headers.Authorization, undefined)
+    return new Response(
+      JSON.stringify({
+        access_token: "valid-token",
+        expires_at: "2999-01-01T00:00:00Z",
+        session_id: "session-a",
+        mfa_required: false,
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    )
+  }
+  localStorage.setItem(TOKEN_KEY, "old-token")
+  localStorage.setItem(EXPIRATION_KEY, "2999-01-01T00:00:00Z")
+  await login("traveler@example.test", "password", "device-a")
+
+  assert.equal(localStorage.getItem(TOKEN_KEY), null)
+  assert.equal(localStorage.getItem(EXPIRATION_KEY), null)
+  assert.equal(getSessionId(), "session-a")
+
+  let authenticationRequired = false
+  window.addEventListener(AUTHENTICATION_REQUIRED_EVENT, () => {
+    authenticationRequired = true
+  })
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ code: "authentication_required", detail: "expired" }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    })
+
+  await assert.rejects(listTrips())
+  assert.equal(getSessionId(), null)
+  assert.equal(authenticationRequired, true)
+})
+
+test("rejected login and MFA do not announce an expired protected session", async () => {
+  let authenticationRequiredCount = 0
+  window.addEventListener(AUTHENTICATION_REQUIRED_EVENT, () => {
+    authenticationRequiredCount += 1
+  })
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ code: "authentication_required", detail: "rejected" }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    })
+
+  await assert.rejects(login("traveler@example.test", "wrong", "device-a"))
+  await assert.rejects(verifyMfa("session-a", "000000"))
+  assert.equal(authenticationRequiredCount, 0)
+})
+
+test("only completed browser sign-ins notify other tabs without storing credentials", async () => {
+  const notificationKey = "travel-agent.sessionChanged"
+  localStorage.removeItem(notificationKey)
+  let mfaRequired = true
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    session_id: "new-session", mfa_required: mfaRequired,
+  }))
+  await login("traveler@example.test", "password", "device-a")
+  assert.equal(localStorage.getItem(notificationKey), null)
+  await verifyMfa("new-session", "123456")
+  const firstNotification = localStorage.getItem(notificationKey)
+  assert.ok(firstNotification)
+  assert.notEqual(firstNotification, "new-session")
+  mfaRequired = false
+  await login("traveler@example.test", "password", "device-a")
+  assert.notEqual(localStorage.getItem(notificationKey), firstNotification)
+})
+
+test("full browser storage does not reject successful login or MFA", async (context) => {
+  context.mock.method(localStorage, "setItem", () => {
+    throw new DOMException("Storage quota exceeded", "QuotaExceededError")
+  })
+  context.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({
+    session_id: "authenticated-session", mfa_required: false,
+  })))
+  for (const signIn of [
+    () => login("traveler@example.test", "password", "device-a"),
+    () => verifyMfa("challenge", "123456"),
+  ]) {
+    const result = await signIn()
+    assert.equal(result.session_id, "authenticated-session")
+    assert.equal(getSessionId(), "authenticated-session")
+  }
+})
