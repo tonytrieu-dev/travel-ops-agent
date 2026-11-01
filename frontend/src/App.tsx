@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import {
   AUTHENTICATION_REQUIRED_EVENT,
+  SESSION_CHANGED_STORAGE_KEY,
   ApiError,
   createTrip,
   getBrowserSession,
@@ -145,8 +146,16 @@ function App() {
 
   useEffect(() => {
     const requireAuthentication = () => window.location.reload()
+    const sessionChanged = (event: StorageEvent) => {
+      if (event.storageArea === localStorage && event.key === SESSION_CHANGED_STORAGE_KEY && event.newValue)
+        window.location.reload()
+    }
     window.addEventListener(AUTHENTICATION_REQUIRED_EVENT, requireAuthentication)
-    return () => window.removeEventListener(AUTHENTICATION_REQUIRED_EVENT, requireAuthentication)
+    window.addEventListener("storage", sessionChanged)
+    return () => {
+      window.removeEventListener(AUTHENTICATION_REQUIRED_EVENT, requireAuthentication)
+      window.removeEventListener("storage", sessionChanged)
+    }
   }, [])
 
   useEffect(() => {

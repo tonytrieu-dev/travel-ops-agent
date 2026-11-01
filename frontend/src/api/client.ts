@@ -17,6 +17,7 @@ import type {
 const API_BASE_URL = import.meta.env?.VITE_API_BASE_URL ?? "http://localhost:8000/api"
 let sessionId: string | null = null
 export const AUTHENTICATION_REQUIRED_EVENT = "travel-agent:authentication-required"
+export const SESSION_CHANGED_STORAGE_KEY = "travel-agent.sessionChanged"
 
 export type LoginResult = {
   expires_at: string
@@ -78,12 +79,23 @@ async function request<TResponse>(
   return (await response.json()) as TResponse
 }
 
+function notifyOtherTabs(): void {
+  try {
+    localStorage.setItem(SESSION_CHANGED_STORAGE_KEY, crypto.randomUUID())
+  } catch {
+    // shortcut: unavailable storage leaves other tabs needing reload; add another transport if required.
+  }
+}
+
 export async function login(email: string, password: string, device_id: string): Promise<LoginResult> {
   const result = await request<LoginResult>("/auth/browser/login", {
     method: "POST",
     body: JSON.stringify({ email, password, device_id }),
   }, false)
-  if (!result.mfa_required) sessionId = result.session_id
+  if (!result.mfa_required) {
+    sessionId = result.session_id
+    notifyOtherTabs()
+  }
   return result
 }
 
@@ -93,6 +105,7 @@ export async function verifyMfa(session_id: string, code: string): Promise<Login
     body: JSON.stringify({ session_id, code }),
   }, false)
   sessionId = result.session_id
+  notifyOtherTabs()
   return result
 }
 

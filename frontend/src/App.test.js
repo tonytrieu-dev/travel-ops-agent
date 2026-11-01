@@ -65,3 +65,27 @@ test("a stale plan response does not overwrite the newly selected trip", async (
   assert.doesNotMatch(view.container.textContent, /Which Tokyo\?/, "stale plan must not render under the new trip")
   assert.equal(view.getByRole("button", { name: "Plan itinerary" }).disabled, false)
 })
+
+test("another tab completing sign-in reloads the current authenticated view", async (context) => {
+  let reloads = 0
+  context.mock.method(globalThis, "fetch", async (url) =>
+    response(url.endsWith("/auth/config") ? { enforced: false } : []))
+  const view = render(createElement(App))
+  await act(async () => {})
+  const browserWindow = window
+  globalThis.window = new Proxy(browserWindow, {
+    get(target, key) {
+      if (key === "location") return { reload: () => { reloads++ } }
+      return Reflect.get(target, key)
+    },
+  })
+  try {
+    browserWindow.dispatchEvent(new browserWindow.StorageEvent("storage", {
+      key: "travel-agent.sessionChanged", newValue: "nonsecret-notification", storageArea: localStorage,
+    }))
+    assert.equal(reloads, 1)
+  } finally {
+    globalThis.window = browserWindow
+    view.unmount()
+  }
+})
