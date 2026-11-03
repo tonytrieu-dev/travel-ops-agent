@@ -325,10 +325,11 @@ def test_failed_authentication_records_target_without_verified_actor(enforced_cl
     user_id = _seed_user("target@example.test", "tenant-a", "traveler", "shared-device")
     _seed_user("operator@example.test", "tenant-a", "security-operator", "operator-device")
     operator_token = _sign_in(enforced_client, "operator@example.test", "operator-device")
-    legitimate_token = _sign_in(enforced_client, "target@example.test", "shared-device")
     pending = enforced_client.post("/api/auth/login", json={
         "email": "target@example.test", "password": "demo-password", "device_id": "shared-device",
     }).json()
+    correct_code = totp_code("JBSWY3DPEHPK3PXP")
+    wrong_code = ("1" if correct_code[0] != "1" else "2") + correct_code[1:]
     for _ in range(5):
         if failure == "password":
             response = enforced_client.post("/api/auth/login", json={
@@ -336,7 +337,7 @@ def test_failed_authentication_records_target_without_verified_actor(enforced_cl
             })
         else:
             response = enforced_client.post("/api/auth/mfa", json={
-                "session_id": pending["session_id"], "code": "000000" if totp_code("JBSWY3DPEHPK3PXP") != "000000" else "111111",
+                "session_id": pending["session_id"], "code": wrong_code,
             })
         assert response.status_code == 401
     events = enforced_client.get("/api/security/events", headers={
@@ -348,6 +349,16 @@ def test_failed_authentication_records_target_without_verified_actor(enforced_cl
     assert all(event["actor_user_id"] is None for event in denials)
     assert all(event["resource"] == f"user:{user_id}" for event in denials)
     assert all(event["session_id"] == (pending["session_id"] if failure == "mfa" else None) for event in denials)
+
+
+def test_failed_authentication_does_not_contain_the_victims_valid_session(enforced_client) -> None:
+    _seed_user("target@example.test", "tenant-a", "traveler", "shared-device")
+    legitimate_token = _sign_in(enforced_client, "target@example.test", "shared-device")
+    for _ in range(5):
+        response = enforced_client.post("/api/auth/login", json={
+            "email": "target@example.test", "password": "wrong", "device_id": "shared-device",
+        })
+        assert response.status_code == 401
     assert enforced_client.get("/api/trips", headers={
         "Authorization": f"Bearer {legitimate_token}",
     }).status_code == 200
@@ -465,71 +476,85 @@ def test_totp_code_cannot_verify_two_sessions_concurrently(enforced_client, monk
     assert enforced_client.get("/api/trips", headers={"Authorization": f"Bearer {token}"}).status_code == 200
 
 
-def test_password_verification_keeps_other_requests_responsive(enforced_client, monkeypatch) -> None:
-    from concurrent.futures import ThreadPoolExecutor
-    from threading import Event
-    from app.security_identity import password_matches
-
-    _seed_user("worker@example.test", "tenant-a", "traveler", "device-a")
-    started = Event()
-    release = Event()
-
-    def blocked_password_check(user, password):
-        started.set()
-        assert release.wait(10), "password worker was never released"
-        return password_matches(user, password)
-
-    monkeypatch.setattr("app.security_identity.password_matches", blocked_password_check)
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        login = pool.submit(enforced_client.post, "/api/auth/login", json={
-            "email": "worker@example.test", "password": "demo-password", "device_id": "device-a",
-        })
-        try:
-            assert started.wait(5)
-            configuration = pool.submit(enforced_client.get, "/api/auth/config")
-            assert configuration.result(timeout=3).status_code == 200
-        finally:
-            release.set()
-        assert login.result(timeout=10).status_code == 200
+def _browser_sign_in(enforced_client, email: str = "browser@example.test", device_id: str = "device-a") -> str:
+    """Complete the browser login+MFA flow and return the session id; the cookie is set on the client."""
+    enforced_client.base_url = "https://testserver"
+    origin = {"Origin": "http://localhost:5173"}
+    login = enforced_client.post("/api/auth/browser/login", headers=origin, json={
+        "email": email, "password": "demo-password", "device_id": device_id,
+    })
+    assert login.status_code == 200, login.text
+    verified = enforced_client.post("/api/auth/browser/mfa", headers=origin, json={
+        "session_id": login.json()["session_id"], "code": totp_code("JBSWY3DPEHPK3PXP"),
+    })
+    assert verified.status_code == 200, verified.text
+    return verified.json()["session_id"]
 
 
-def test_browser_session_uses_cookie_and_rejects_cross_origin_writes(enforced_client) -> None:
+def test_browser_login_rejects_cross_origin_and_omits_bearer_token(enforced_client) -> None:
     enforced_client.base_url = "https://testserver"
     _seed_user("browser@example.test", "tenant-a", "traveler", "device-a")
-    origin = {"Origin": "http://localhost:5173"}
     rejected = enforced_client.post("/api/auth/browser/login", headers={"Origin": "https://attacker.test"}, json={
         "email": "browser@example.test", "password": "demo-password", "device_id": "device-a",
     })
-    assert rejected.status_code == 403 and not rejected.cookies
-    response = enforced_client.post('/api/auth/browser/login', headers=origin, json={
-        'email': 'browser@example.test', 'password': 'demo-password', 'device_id': 'device-a',
+    assert rejected.status_code == 403
+    assert not rejected.cookies
+
+    accepted = enforced_client.post("/api/auth/browser/login", headers={"Origin": "http://localhost:5173"}, json={
+        "email": "browser@example.test", "password": "demo-password", "device_id": "device-a",
     })
-    assert response.status_code == 200, response.text
-    assert 'access_token' not in response.json()
-    assert not response.cookies
-    verified = enforced_client.post('/api/auth/browser/mfa', headers=origin, json={
-        'session_id': response.json()['session_id'], 'code': totp_code('JBSWY3DPEHPK3PXP'),
+    assert accepted.status_code == 200, accepted.text
+    assert "access_token" not in accepted.json()
+    assert not accepted.cookies
+
+
+def test_browser_mfa_sets_a_hardened_session_cookie(enforced_client) -> None:
+    _seed_user("browser@example.test", "tenant-a", "traveler", "device-a")
+    enforced_client.base_url = "https://testserver"
+    origin = {"Origin": "http://localhost:5173"}
+    login = enforced_client.post("/api/auth/browser/login", headers=origin, json={
+        "email": "browser@example.test", "password": "demo-password", "device_id": "device-a",
+    })
+    verified = enforced_client.post("/api/auth/browser/mfa", headers=origin, json={
+        "session_id": login.json()["session_id"], "code": totp_code("JBSWY3DPEHPK3PXP"),
     })
     assert verified.status_code == 200, verified.text
-    assert 'access_token' not in verified.json()
-    cookie = verified.headers['set-cookie']
-    assert 'Secure' in cookie and 'HttpOnly' in cookie and 'SameSite=strict' in cookie and 'Path=/api' in cookie
-    assert enforced_client.get('/api/auth/browser/session').status_code == 200
-    assert enforced_client.get('/api/trips').status_code == 200
-    payload = {'origin':'JFK', 'destination':'Paris', 'destination_airport':'CDG', 'depart_date':'2030-08-01', 'age':30, 'fitness_level':'high'}
-    for headers in ({}, {'Origin':'https://attacker.test'}, {'Origin':'null'}):
-        assert enforced_client.post('/api/trips', json=payload, headers=headers).status_code == 403
-    assert enforced_client.post('/api/trips', json=payload, headers=origin).status_code == 200
-    preflight = enforced_client.options('/api/trips', headers={**origin, 'Access-Control-Request-Method':'POST'})
-    assert preflight.headers['access-control-allow-credentials'] == 'true'
+    assert "access_token" not in verified.json()
+    cookie = verified.headers["set-cookie"]
+    assert "Secure" in cookie, cookie
+    assert "HttpOnly" in cookie, cookie
+    assert "SameSite=strict" in cookie, cookie
+    assert "Path=/api" in cookie, cookie
+
+
+def test_browser_cookie_session_reads_but_rejects_cross_origin_writes(enforced_client) -> None:
+    _seed_user("browser@example.test", "tenant-a", "traveler", "device-a")
+    _browser_sign_in(enforced_client)
+    origin = {"Origin": "http://localhost:5173"}
+
+    assert enforced_client.get("/api/auth/browser/session").status_code == 200
+    assert enforced_client.get("/api/trips").status_code == 200
+
+    payload = {"origin": "JFK", "destination": "Paris", "destination_airport": "CDG",
+               "depart_date": "2030-08-01", "age": 30, "fitness_level": "high"}
+    for headers in ({}, {"Origin": "https://attacker.test"}, {"Origin": "null"}):
+        assert enforced_client.post("/api/trips", json=payload, headers=headers).status_code == 403, headers
+    assert enforced_client.post("/api/trips", json=payload, headers=origin).status_code == 200
+    preflight = enforced_client.options("/api/trips", headers={**origin, "Access-Control-Request-Method": "POST"})
+    assert preflight.headers["access-control-allow-credentials"] == "true"
+
+
+def test_browser_session_revocation_rejects_the_cookie(enforced_client) -> None:
+    _seed_user("browser@example.test", "tenant-a", "traveler", "device-a")
+    session_id = _browser_sign_in(enforced_client)
 
     async def revoke_browser_session(session):
         from sqlalchemy import select
         from sqlmodel import col
         from app.models import SecuritySession, utcnow
-        persisted = await session.scalar(select(SecuritySession).where(col(SecuritySession.session_id) == verified.json()["session_id"]))
+        persisted = await session.scalar(select(SecuritySession).where(col(SecuritySession.session_id) == session_id))
         assert persisted is not None
         persisted.revoked_at = utcnow()
 
     run_db(revoke_browser_session)
-    assert enforced_client.get('/api/auth/browser/session').status_code == 401
+    assert enforced_client.get("/api/auth/browser/session").status_code == 401

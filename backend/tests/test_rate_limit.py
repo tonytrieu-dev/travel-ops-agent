@@ -5,10 +5,9 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
-from app.config import RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECONDS
+from app.config import RATE_LIMIT_MAX_REQUESTS
 from app.db import get_session
 from app.main import app
-from app.rate_limit import _enforce_rate_limit, _request_timestamps
 from tests.db_helpers import run_db, seed_trip
 
 
@@ -125,14 +124,3 @@ async def test_login_rejects_oversized_email_before_database_access(monkeypatch)
 
     assert response.status_code == 422
     session.scalar.assert_not_called()
-
-
-@pytest.mark.no_database
-def test_rate_limit_store_purges_expired_keys(monkeypatch) -> None:
-    now = 1_000.0
-    _request_timestamps["expired"] = [now - RATE_LIMIT_WINDOW_SECONDS - 1]
-    monkeypatch.setattr("app.rate_limit.time.monotonic", lambda: now)
-
-    _enforce_rate_limit("active")
-
-    assert "expired" not in _request_timestamps

@@ -164,12 +164,12 @@ Stable identifiers refer to the October 28 review; preserve before/after evidenc
 | F5 | Should fix: connector fetch error is hidden by the loading branch | Render initial error before loading | Fixed; component regressions cover 403 and network failures |
 | F6 | Should fix: historical validation matrix cites absent tests | Reconcile claims against actual assertions | Fixed; four matrix rows corrected as recorded below |
 
-## Follow-up Ponytail audit
+## Follow-up audit
 
-The [October 28 PR #4 audit](PR4_AUDIT_2026-10-28.md) reviewed the committed PR
-and current local fixes. Original F1–F4 reproductions remain fixed locally, but
-this follow-up found two additional containment cases. A prior passing suite is
-not a clean bill of health. No application code was changed during the audit.
+A follow-up audit reviewed the committed PR and current local fixes. Original
+F1–F4 reproductions remain fixed locally, but this follow-up found two additional
+containment cases. A prior passing suite is not a clean bill of health. No
+application code was changed during the audit.
 
 | ID | Before / observed behavior | Proposed change | Status |
 |---|---|---|---|
