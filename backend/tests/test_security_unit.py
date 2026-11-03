@@ -61,3 +61,31 @@ def test_enforced_signing_secret_requires_32_bytes() -> None:
         Settings(**settings, zero_trust_signing_secret="x" * 31)
 
     assert Settings(**settings, zero_trust_signing_secret="x" * 32)
+
+
+def test_containment_reports_to_sentry_only_when_dsn_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sentry_sdk
+
+    from app import security_evidence
+    from app.models import SecurityEvent
+
+    captured: list[str] = []
+    monkeypatch.setattr(sentry_sdk, "capture_message", lambda message, level: captured.append(message))
+    event = SecurityEvent(
+        tenant_id="tenant-a", session_id="session-a", device_id="device-a",
+        source_segment="api", target_segment="api", action="trip.read",
+        resource="trip:1", decision="deny",
+    )
+
+    monkeypatch.setattr(security_evidence, "get_settings", lambda: _settings(enforced=True))
+    security_evidence._report_containment(event)
+    assert captured == []
+
+    monkeypatch.setattr(
+        security_evidence, "get_settings",
+        lambda: _settings(enforced=True).model_copy(update={"sentry_dsn": "https://k@example.test/1"}),
+    )
+    security_evidence._report_containment(event)
+    assert captured == ["Session contained: 5 denials revoked session session-a"]

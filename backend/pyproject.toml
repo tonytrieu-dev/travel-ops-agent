@@ -16,6 +16,7 @@ dependencies = [
     "httpx>=0.28",
     "python-multipart>=0.0.20",
     "baml-bridge>=0.23.0",
+    "sentry-sdk[fastapi]>=2.0",
 ]
 
 [dependency-groups]

@@ -47,6 +47,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app() -> FastAPI:
     settings = get_settings()
+    if settings.sentry_dsn:
+        import sentry_sdk
+
+        sentry_sdk.init(dsn=settings.sentry_dsn.get_secret_value())
     app = FastAPI(title="Travel Agent API", version="0.1.0", lifespan=_lifespan)
 
     @app.middleware("http")

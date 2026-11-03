@@ -120,6 +120,8 @@ class Settings(BaseSettings):
     slack_signing_secret: SecretStr | None = None
     slack_approvals_channel_id: str | None = None
 
+    # No DSN -> Sentry stays off, so local runs and tests need no Sentry project.
+    sentry_dsn: SecretStr | None = None
     @computed_field
     @property
     def dbos_database_url(self) -> str:

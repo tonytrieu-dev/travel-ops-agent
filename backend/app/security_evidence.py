@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
 from app.db import get_session_factory
+from app.config import get_settings
 from app import security_posture as posture
 from app.models import SecurityEvent, SecurityIncident, SecuritySession, utcnow
 from app.request_context import correlation_id
@@ -23,6 +24,18 @@ if TYPE_CHECKING:
 DENIAL_THRESHOLD = 5
 DENIAL_WINDOW_MINUTES = 5
 SECURITY_POLICY_VERSION = "1"
+
+
+def _report_containment(event: SecurityEvent) -> None:
+    """Surface automatic session containment to Sentry; a no-op when no DSN is configured."""
+    if get_settings().sentry_dsn is None:
+        return
+    import sentry_sdk
+
+    sentry_sdk.capture_message(
+        f"Session contained: {DENIAL_THRESHOLD} denials revoked session {event.session_id}",
+        level="warning",
+    )
 
 
 async def record_security_event(
@@ -119,6 +132,7 @@ async def record_security_event(
                         related_event_ids=[denial.id for denial in denied if denial.id is not None],
                         created_at=security_session.revoked_at,
                     ))
+                    _report_containment(event)
     await session.commit()
     return event
 
