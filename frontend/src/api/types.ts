@@ -39,6 +39,7 @@ export type ErrorCode =
   | "trip_not_found"
   | "flight_not_found"
   | "booking_expired"
+  | "booking_options_unavailable"
   | "invalid_transition"
   | "validation_error"
   | "rate_limit_exceeded"

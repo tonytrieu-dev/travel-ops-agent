@@ -28,6 +28,7 @@ from app.routes.connectors import ConnectorError
 from app.schemas import ErrorCode, ProblemDetail
 from app.security_admission import SecurityError
 from app.security_identity import SESSION_COOKIE_NAME
+from app.security_evidence import record_authentication_failure
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,7 @@ def create_app() -> FastAPI:
             request.method not in {"GET", "HEAD", "OPTIONS"} and browser_write
             and request.headers.get("origin") != settings.frontend_origin
         ):
+            await record_authentication_failure(reason="trusted browser origin required", request=request)
             return JSONResponse(status_code=403, content={"code": "forbidden", "detail": "trusted browser origin required"})
         return await call_next(request)
 

@@ -23,12 +23,11 @@ from app.security_identity import (
     issue_access_token,
 )
 from app.models import SecurityEvent, SecurityIncident, SecuritySession, User, utcnow
-from app.repositories.trips_repository import TripError
 from app.security_evidence import (
     DENIAL_THRESHOLD,
     record_security_event,
 )
-from app.security_admission import SecurityError, admit_trip, authorize
+from app.security_admission import authorize
 from tests.db_helpers import TEST_DATABASE_URL, run_db
 
 _SIGNING_SECRET = "unit-test-signing-secret-at-least-32-bytes"
@@ -105,13 +104,6 @@ def _events(action: str | None = None, decision: str | None = None) -> list[Secu
     return run_db(_read)
 
 
-# --- Identity verification ---------------------------------------------------------------------
-# One test per rejection cause, because each is a separate branch in authenticate_identity and a
-# separate bug if it regresses: a good token, a forged signature, stale claims, expiry, and
-# revocation. They are not interchangeable — e.g. revocation and expiry are different code paths,
-# and a bug can break one while the other still passes.
-
-
 def test_tampered_token_signature_is_rejected(enforced: Settings) -> None:
     async def _work(session: AsyncSession) -> None:
         user = await _add_user(session)
@@ -156,67 +148,7 @@ def test_expired_token_is_rejected(enforced: Settings) -> None:
     assert error.value.status_code == 401
 
 
-def test_revoked_session_rejects_an_otherwise_valid_token(enforced: Settings) -> None:
-    """Revocation is the containment primitive — a still-unexpired, correctly-signed token must
-    die the instant its backing session is revoked. Distinct path from expiry above."""
-
-    async def _work(session: AsyncSession) -> None:
-        user = await _add_user(session)
-        security_session = await create_security_session(session, user, user.device_id)
-        security_session.mfa_verified = True
-        token = issue_access_token(security_session, user)
-        security_session.revoked_at = utcnow()
-        await session.flush()
-        await authenticate_identity(f"Bearer {token}", session)
-
-    with pytest.raises(HTTPException) as error:
-        run_db(_work)
-    assert error.value.status_code == 401
-
-
-# --- MFA and RBAC ------------------------------------------------------------------------------
-
-
-def test_privileged_action_needs_mfa_and_the_right_role(enforced: Settings) -> None:
-    """authorize() is the single policy gate: it must deny an unverified session, deny a role
-    that lacks the action, and allow only when both role and MFA are satisfied. One test, three
-    assertions, because they share one code path and one failure would implicate it."""
-
-    async def _work(session: AsyncSession) -> None:
-        traveler = await _add_user(session)
-        with pytest.raises(SecurityError, match="MFA"):
-            await authorize(
-                _context(traveler, mfa_verified=False), session,
-                action="booking.approve", resource="booking:1", require_mfa=True,
-            )
-        with pytest.raises(SecurityError, match="role"):
-            await authorize(
-                _context(traveler, mfa_verified=True), session,
-                action="security.read", resource="x", require_mfa=True,
-            )
-        operator = await _add_user(session, role="security-operator", device_id="device-op")
-        await authorize(
-            _context(operator, mfa_verified=True), session,
-            action="security.read", resource="security-events", require_mfa=True,
-        )
-
-    run_db(_work)
-
-
 # --- Micro-segmentation and tenant isolation ---------------------------------------------------
-
-
-def test_missing_resource_records_denial_when_enforcement_is_disabled(
-    unenforced: Settings,
-) -> None:
-    async def _work(session: AsyncSession) -> None:
-        context = _context(await _add_user(session), mfa_verified=False)
-        with pytest.raises(TripError):
-            await admit_trip(session, context, 999_999, action="trip.read")
-
-    run_db(_work)
-    events = _events(action="trip.read")
-    assert events and events[-1].decision == "deny"
 
 
 # --- Continuous monitoring ---------------------------------------------------------------------

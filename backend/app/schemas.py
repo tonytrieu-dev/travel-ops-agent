@@ -57,6 +57,7 @@ class ErrorCode(StrEnum):
     TRIP_NOT_FOUND = "trip_not_found"
     FLIGHT_NOT_FOUND = "flight_not_found"
     BOOKING_EXPIRED = "booking_expired"
+    BOOKING_OPTIONS_UNAVAILABLE = "booking_options_unavailable"
     INVALID_TRANSITION = "invalid_transition"
     VALIDATION_ERROR = "validation_error"
     RATE_LIMIT_EXCEEDED = "rate_limit_exceeded"

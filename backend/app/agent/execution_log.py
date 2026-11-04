@@ -8,13 +8,17 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
+from pydantic_ai.messages import ModelMessage
+from pydantic_ai.usage import RunUsage
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
-from app.models import AgentRun, ExecutionEvent, ExecutionEventKind, TripRequest, utcnow
+from app.agent.observability import derive_steps
+from app.models import AgentRun, AgentRunStep, ExecutionEvent, ExecutionEventKind, TripRequest, utcnow
 from app.request_context import bind_correlation_id, correlation_id
 
 
@@ -58,12 +62,7 @@ async def execution_context(
             yield agent_run
         except Exception:
             if agent_run is not None and agent_run.status == "running":
-                agent_run.status = "failed"
-                agent_run.finished_at = utcnow()
-                agent_run.total_ms = round(
-                    (agent_run.finished_at - agent_run.started_at).total_seconds() * 1000
-                )
-                await session.commit()
+                await finish_run("failed")
             raise
         finally:
             _current.reset(token)
@@ -125,3 +124,46 @@ async def record_event(
             )
         )
         await context.session.commit()
+
+
+async def finish_run(
+    status: str,
+    *,
+    steps: list[AgentRunStep] | None = None,
+    total_ms: int | None = None,
+    started_at: datetime | None = None,
+    usage: RunUsage | None = None,
+) -> None:
+    context = _bound_context("finish_run")
+    agent_run = context.agent_run
+    if agent_run is None:
+        raise RuntimeError("finish_run requires an execution context with a run")
+    finished_at = utcnow()
+    agent_run.status = status
+    if started_at is not None:
+        agent_run.started_at = started_at
+    agent_run.finished_at = finished_at
+    agent_run.total_ms = (
+        total_ms if total_ms is not None
+        else round((finished_at - agent_run.started_at).total_seconds() * 1000)
+    )
+    if usage is not None:
+        agent_run.total_input_tokens = usage.input_tokens
+        agent_run.total_output_tokens = usage.output_tokens
+    assert agent_run.id is not None
+    for step in steps or []:
+        step.agent_run_id = agent_run.id
+        context.session.add(step)
+    await context.session.commit()
+
+
+async def finish_planner_run(
+    message_history: list[ModelMessage], usage: RunUsage, *, status: str = "completed",
+) -> None:
+    started_at = message_history[0].timestamp if message_history else None
+    finished_at = message_history[-1].timestamp if message_history else None
+    total_ms = (
+        round((finished_at - started_at).total_seconds() * 1000)
+        if started_at is not None and finished_at is not None else 0
+    )
+    await finish_run(status, steps=derive_steps(message_history), total_ms=total_ms, usage=usage)

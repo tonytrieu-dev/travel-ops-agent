@@ -21,6 +21,7 @@ from app.models import SecuritySession, User, utcnow
 from app.schemas import LoginRequest, MfaVerifyRequest, TokenOut
 from app.security_evidence import record_authentication_failure, record_security_event
 from app import security_posture as posture
+from app.security_device import verify_device_certificate
 from app.security_token_issuer import issue_token, verify_token
 
 
@@ -106,7 +107,10 @@ async def _authenticated_identity(
     authorization: str, session: AsyncSession, request: Request | None = None
 ) -> tuple[User, SecurityContext]:
     try:
-        return await authenticate_identity(authorization, session)
+        user, context = await authenticate_identity(authorization, session)
+        if request is not None:
+            verify_device_certificate(request, context.device_id)
+        return user, context
     except HTTPException:
         await record_authentication_failure(reason="authentication failure", request=request)
         raise
@@ -170,7 +174,7 @@ async def verify_session_mfa(
     session: AsyncSession, security_session: SecuritySession, code: str
 ) -> bool:
     user = await session.get(User, security_session.user_id)
-    if user is None or user.disabled or not user.mfa_enabled or security_session.revoked_at is not None:
+    if user is None or user.disabled or not user.mfa_enabled or not user.totp_secret or security_session.revoked_at is not None:
         return False
     timestamp = int(time.time())
     if not hmac.compare_digest(totp_code(user.totp_secret, timestamp), code):
@@ -237,6 +241,11 @@ async def login_identity(
             request=request,
         )
         raise HTTPException(status_code=401, detail="invalid credentials")
+    try:
+        verify_device_certificate(request, user.device_id)
+    except HTTPException:
+        await record_authentication_failure(reason="device certificate rejected", request=request)
+        raise
     security_session = await create_security_session(session, user, body.device_id)
     await record_security_event(
         session, None, action="auth.login", resource=f"user:{user.id}", decision="allow",
@@ -256,6 +265,11 @@ async def verify_identity_mfa(
     if security_session is None:
         await record_authentication_failure(reason="MFA session expired", request=request)
         raise HTTPException(status_code=401, detail="session expired")
+    try:
+        verify_device_certificate(request, security_session.device_id)
+    except HTTPException:
+        await record_authentication_failure(reason="device certificate rejected", request=request)
+        raise
     evidence = {
         "tenant_id": security_session.tenant_id,
         "resource": f"user:{security_session.user_id}",

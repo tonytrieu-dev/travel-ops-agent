@@ -76,7 +76,7 @@ def test_containment_reports_to_sentry_only_when_dsn_configured(
     event = SecurityEvent(
         tenant_id="tenant-a", session_id="session-a", device_id="device-a",
         source_segment="api", target_segment="api", action="trip.read",
-        resource="trip:1", decision="deny",
+        resource="trip:1", decision="deny", reason="tenant or owner mismatch",
     )
 
     monkeypatch.setattr(security_evidence, "get_settings", lambda: _settings(enforced=True))

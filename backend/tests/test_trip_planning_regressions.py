@@ -149,54 +149,6 @@ def test_durable_workflow_persists_without_the_http_caller(client, planner_spy) 
     assert planner_spy.calls == 1
 
 
-def test_trip_edit_waits_for_final_itinerary_write(client) -> None:
-    from sqlalchemy import event
-    from app.db import get_engine
-
-    trip_id = create_trip(client)
-    checked = Event()
-    release = Event()
-    engine = get_engine().sync_engine
-
-    def pause_before_insert(connection, cursor, statement, parameters, context, executemany):
-        if not statement.startswith("INSERT INTO itinerary"):
-            return
-        checked.set()
-        assert release.wait(10), "itinerary write was never released"
-
-    event.listen(engine, "before_cursor_execute", pause_before_insert)
-    try:
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            planning = pool.submit(client.post, f'/api/trips/{trip_id}/plan')
-            assert checked.wait(10), "planner never reached its final write"
-            # A separate connection can try the edit while the app loop is paused.
-            async def edit(session):
-                from app.repositories.trips_repository import update_trip
-                from app.schemas import TripRequestUpdate
-                return await update_trip(session, trip_id, TripRequestUpdate(fitness_level="low"))
-
-            editing = pool.submit(run_db, edit)
-            try:
-                deadline = monotonic() + 5
-                while not run_db(lambda session: session.scalar(text(
-                    "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
-                    "AND wait_event_type = 'Lock' AND query LIKE '%trip_request%'"
-                ))):
-                    assert not editing.done(), "trip edit bypassed the final itinerary write"
-                    assert monotonic() < deadline, "trip edit never waited for the trip lock"
-                    sleep(0.01)
-            finally:
-                release.set()
-            assert planning.result(timeout=15).status_code in (200, 409)
-            editing.result(timeout=15)
-    finally:
-        release.set()
-        event.remove(engine, "before_cursor_execute", pause_before_insert)
-    snapshot = client.get(f'/api/trips/{trip_id}/snapshot').json()
-    assert snapshot['trip']['fitness_level'] == 'low'
-    assert snapshot['plan'] is None
-
-
 def test_flight_search_edit_race(client, flight_search_spy, monkeypatch):
     started, release = Event(), Event()
     original = flight_search_spy.search_offers

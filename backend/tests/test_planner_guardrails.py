@@ -3,15 +3,26 @@
 from typing import Literal
 
 import pytest
-from pydantic_ai import ModelRetry, RunContext
+from pydantic_ai import ModelRetry, RunContext, UnexpectedModelBehavior
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
 
-from app.agent.planner import PlannerDeps, reject_unsafe_intensity
+from app.agent.planner import PlannerDeps, agent, reject_unsafe_intensity
 from app.models import FitnessLevel
 from app.schemas import ActivityOut, ItineraryDayOut, ItineraryOut
 
 pytestmark = pytest.mark.no_database
+
+
+@pytest.mark.asyncio
+async def test_planner_retries_instead_of_accepting_an_empty_itinerary() -> None:
+    model = TestModel(call_tools=[], custom_output_args={"days": []})
+    with agent.override(model=model):
+        with pytest.raises(UnexpectedModelBehavior, match="output retries"):
+            await agent.run("Plan a trip", deps=PlannerDeps(
+                flight_provider=None,  # type: ignore[arg-type]
+                activity_provider=None,  # type: ignore[arg-type]
+            ))
 
 
 @pytest.mark.parametrize("intensity", ["high", "moderate"])

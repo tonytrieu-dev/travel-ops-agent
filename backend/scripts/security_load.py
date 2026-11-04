@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import os
+import ssl
 from concurrent.futures import ThreadPoolExecutor
 from statistics import median
 from time import perf_counter
@@ -42,7 +43,9 @@ def main() -> None:
     parser.add_argument("--requests", type=int, default=100)
     parser.add_argument("--concurrency", type=int, default=4)
     arguments = parser.parse_args()
-    with httpx.Client(base_url=os.getenv("TRAVEL_OPS_URL", "http://localhost:8000")) as client:
+    transport = ssl.create_default_context(cafile=os.environ["TRAVEL_OPS_CA"])
+    transport.load_cert_chain(os.environ["TRAVEL_OPS_CERTIFICATE"], os.environ["TRAVEL_OPS_PRIVATE_KEY"])
+    with httpx.Client(base_url=os.getenv("TRAVEL_OPS_URL", "https://localhost:8443"), verify=transport) as client:
         result = measure(
             client, {"Authorization": f"Bearer {os.environ['TRAVEL_OPS_TOKEN']}"},
             requests=arguments.requests, concurrency=arguments.concurrency,

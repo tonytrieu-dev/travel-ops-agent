@@ -1,4 +1,4 @@
-"""Rate limiting for the two quota-spending routes (/plan, /flights/search): a per-IP request
+"""Rate limiting for the two quota-spending routes (/plan, /flights/search): a per-client request
 cap, and a global concurrency cap on real LLM calls specifically.
 """
 
@@ -12,6 +12,7 @@ from app.config import (
     RATE_LIMIT_MAX_REQUESTS,
     RATE_LIMIT_WINDOW_SECONDS,
 )
+from app.security_device import verified_device_id
 from app.schemas import ErrorCode, LoginRequest
 
 _agent_run_lock = asyncio.Lock()
@@ -54,13 +55,20 @@ def _enforce_rate_limit(key: str) -> None:
     _request_timestamps[key] = recent
 
 
+def _client_key(request: Request) -> str:
+    device_id = verified_device_id(request)
+    if device_id is not None:
+        return f"device:{device_id}"
+    return f"ip:{request.client.host if request.client else 'unknown'}"
+
+
 async def enforce_request_rate_limit(request: Request) -> None:
-    _enforce_rate_limit(request.client.host if request.client else "unknown")
+    _enforce_rate_limit(_client_key(request))
 
 
 async def enforce_login_rate_limit(body: LoginRequest, request: Request) -> None:
-    client_ip = request.client.host if request.client else "unknown"
-    _enforce_rate_limit(f"login-client:{client_ip}")
+    client_key = _client_key(request)
+    _enforce_rate_limit(f"login-client:{client_key}")
     _enforce_rate_limit(f"login-account:{body.email.strip().casefold()}")
 
 

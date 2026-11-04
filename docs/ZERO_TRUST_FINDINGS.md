@@ -1,3 +1,12 @@
+Current implementation update (2026-10-31): ordinary accounts now enroll unique TOTP secrets;
+the public legacy secret is retired by migration. Origin-policy denials are audited without
+attribution, and `platform-operator` can investigate unattributed and cross-tenant security
+evidence. The optional [isolated deployment](../README.md#running-it) adds CA-validated device
+certificates, private networks and a restricted runtime database role. The backend suite
+passes 88 cases; a real restricted database login rejects audit mutation/DDL and starts DBOS
+in its own schema. Docker network isolation and the gateway handshake have not been executed
+in this environment, so the older gap analysis below remains historical deployment evidence.
+
 # Zero-trust architecture: before, after, and demonstration evidence
 
 Updated: October 28, 2026. Living engineering record prepared with AI assistance.
@@ -67,6 +76,73 @@ Development mode in the current application is not an exact historical baseline.
 | Alternate approval | Signed Slack callback supplied a connector-level approval path | Legacy Slack approval is unavailable under enforcement until actor identity, ownership, role and MFA can be established | Shared signing secret alone does not authenticate the approving application user |
 
 Implementation paths above are under `backend/app/` unless otherwise stated.
+
+## Hypotheses and results
+
+Four security hypotheses, each stated as a falsifiable prediction, tested, and given
+an explicit verdict. These are the strongest-evidence claims only: each is a measured
+result or an all-or-nothing guarantee that proves a zero-trust boundary holds (or, for
+H3, held only after a defect the evidence exposed was corrected). Identity, MFA, and
+micro-segmentation coverage is documented in the before/after design table and the
+three-scenario demonstration; it is not restated here as counts. The database-backed
+verdicts (H2, H3) were executed against real PostgreSQL 16.2: the full
+`test_append_only`, `test_compliance`, `test_security`, and `test_security_integration`
+suites passed (39 tests), on a rootless local server (`pgserver`) with a `uuid-ossp`
+extension shim supplied for the DBOS durable-execution layer's startup migration.
+
+**H1 — Credential hardening (identity and access management).**
+*Hypothesis:* the password store makes offline guessing against a stolen hash
+computationally expensive enough to matter. *Prediction:* per-verification cost on the
+order of tens of milliseconds, bounding a single core to low-tens of guesses per second.
+*Method:* `scripts.credential_cost`, 25 samples, timing the full wrong-guess path (a miss
+pays the same cost as a hit). *Result:* the stable invariant is PBKDF2-HMAC-SHA256,
+600,000 iterations, 16-byte random per-password salt (`password_hash` in
+`security_identity.py`); on our development hardware this measured ≈65–80 ms per
+verification (≈12–15 single-core guesses/s) across runs. *Verdict:* **supported.** The
+iteration count and salt are the reproducible claim; the wall-clock figure is
+hardware-dependent and illustrative, re-measured per machine.
+
+**H2 — Audit immutability (continuous monitoring).**
+*Hypothesis:* recorded security evidence cannot be altered or erased through the
+application's data path. *Prediction:* every UPDATE, DELETE, and TRUNCATE against an
+audit table is rejected, 100% of attempts. *Method:* database-trigger enforcement,
+asserted by `test_append_only.py::test_audit_rows_are_append_only` and
+`::test_audit_tables_cannot_be_truncated`. *Result:* all mutation and truncation
+attempts raise and the rows survive unchanged. *Verdict:* **supported — executed against
+real PostgreSQL 16.2** (both tests passed).
+
+**H3 — Automatic containment (incident response) — a hypothesis the evidence first
+rejected.**
+*Hypothesis:* the denial-threshold mechanism contains a hostile session without harming
+legitimate ones. *Prediction:* repeated unauthorized requests revoke only the offending
+session, never an innocent one. *Method:* cross-tenant and failed-authentication
+regressions. *Initial result (rejected):* finding F1 — four attacker login failures
+against a victim plus one victim denial revoked the **victim's** session; ordinary
+access went from 200 to 401. The prediction was falsified: containment was poisoning an
+innocent session. *Correction and re-test:* failed logins no longer claim the target's
+registered device, and containment separates sessionless from session-bearing denial
+windows. *Final result:* the bound is 5 denials within a 5-minute window
+(`DENIAL_THRESHOLD=5` in `security_evidence.py`); the offending session is revoked and
+the next request returns 401, while the innocent session is untouched
+(`test_failed_authentication_records_target_without_verified_actor`;
+`test_compliance.py::test_cross_tenant_denials_produce_traceable_containment`).
+*Verdict:* **rejected as first designed, supported after correction — executed against
+real PostgreSQL 16.2** (all three regressions passed).
+
+**H4 — Signed-token forgery resistance (identity and access management).**
+*Hypothesis:* a request cannot be authenticated with a tampered or forged bearer token.
+*Prediction:* 100% of tampered tokens are rejected while valid tokens are accepted.
+*Method:* `scripts.token_integrity`, 250 trials × 4 tamper classes (flipped signature,
+forged claims with a reused signature, malformed, empty). *Result:* 1000/1000 tampered
+tokens rejected, 250/250 valid tokens accepted (reproduced). *Verdict:* **supported.**
+
+A latency cost was also observed (p50 +4.3 ms, p95 +8.3 ms, −9.5% throughput over a
+100-request in-process sample in `SECURITY_EVALUATION.md`); it is reported as an aside,
+not a hypothesis — the sample is too small for tail percentiles (p99 would need a larger
+run) and excludes real network, TLS, and reverse-proxy cost.
+
+Reproduce H1 from `backend` with `uv run python -m scripts.credential_cost`, and H4 with
+`ZERO_TRUST_SIGNING_SECRET=$(openssl rand -hex 32) uv run python -m scripts.token_integrity`.
 
 ## Presentation scope and three-scenario demonstration
 
@@ -202,7 +278,9 @@ prose now distinguishes historical results from current coverage.
 - October 28 F1 regression: both parameter cases first failed (victim read returned
   401 instead of 200), then passed after the source-attribution fix. Test:
   `test_failed_logins_cannot_poison_victim_containment` in
-  `backend/tests/test_security_integration.py`.
+  `backend/tests/test_security_integration.py`. Current coverage is the stronger
+  `test_failed_authentication_records_target_without_verified_actor` regression,
+  which also checks persisted attribution for password and MFA failures.
 - No new latency benchmark was authorized or run. Numbers in
   `SECURITY_EVALUATION.md` are historical, not measurements of current fixes.
 - No production deployment, application-database migration, live provider call,
@@ -281,12 +359,13 @@ code and passed after. No application code path was left without a runnable chec
 
 | ID | Before / problem | Design or implementation response | Status / evidence |
 |---|---|---|---|
-| AR9 | Several frontend paths let a late response land under the wrong context: a resolving plan overwrote a newly selected trip; a run's final refresh was lost when a poll was in flight; a suppressed denial showed perpetual "Loading…" after remount; evidence landed under a switched assessment; an expired MFA challenge had no recovery; one trip's "clear" hid another's activity; date-only values rendered a day early in negative-offset zones | Request/selection-identity guards discard obsolete results (`App.tsx` selection generation, `CompliancePanel` evidence request id); `usePolledResource` rejects obsolete responses, preserves one pending refresh, and surfaces a cached denial as an error; `LoginPanel` adds an MFA restart; `LiveActivity` scopes its clear cutoff to its trip; date-only values are formatted without UTC conversion | Verified with mounted React tests (`@testing-library/react` + jsdom): `App.test.js`, `usePolledResource.test.js`, `selection.test.js`, `activity.test.js`, `dates.test.js`. The prior hand-mocked hook harness that could not reproduce rerenders was replaced |
+| AR9 | Several frontend paths let a late response land under the wrong context: a resolving plan overwrote a newly selected trip; a run's final refresh was lost when a poll was in flight; a suppressed denial showed perpetual "Loading…" after remount; evidence landed under a switched assessment; an expired MFA challenge had no recovery; one trip's "clear" hid another's activity; date-only values rendered a day early in negative-offset zones | Request/selection-identity guards discard obsolete results (`useActiveTrip` selection generation, `CompliancePanel` evidence request id); `usePolledResource` rejects obsolete responses, preserves one pending refresh, and surfaces a cached denial as an error; `LoginPanel` adds an MFA restart; `LiveActivity` scopes its clear cutoff to its trip; date-only values are formatted without UTC conversion | Verified with mounted React tests (`@testing-library/react` + jsdom): `App.test.js`, `usePolledResource.test.js`, `selection.test.js`, `activity.test.js`, `dates.test.js`. The prior hand-mocked hook harness that could not reproduce rerenders was replaced |
 
 Also corrected: the `README` zero-trust demo omitted the `uvicorn` start step and copied a native
 `DATABASE_URL` mismatched with the Docker service, and overstated booking-options provider-failure
-preservation beyond what a regression actually asserts. Both are now accurate (see `README.md`,
-reconciled against `SECURITY_EVALUATION.md`).
+preservation beyond what a regression actually asserted. The current regression now verifies that
+provider failure preserves `CONFIRMED` and returns a retryable error (see `README.md`,
+`SECURITY_EVALUATION.md`, and `test_booking_regressions.py`).
 
 ### October 29 architecture-review validation
 

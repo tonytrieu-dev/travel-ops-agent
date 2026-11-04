@@ -31,6 +31,7 @@ _ROLE_ACTIONS = {
         "trip.read", "trip.create", "trip.update", "trip.plan", "trip.execution.read",
         "flight.search", "booking.read",
     },
+    "platform-operator": {"security.read"},
     "security-operator": {"security.read", "connector.configure"},
     "admin": {
         "trip.read", "trip.create", "trip.update", "trip.plan", "trip.execution.read",

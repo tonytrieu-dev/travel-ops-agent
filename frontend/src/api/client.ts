@@ -202,3 +202,7 @@ export function setSlackConnectorEnabled(enabled: boolean): Promise<ConnectorsOu
     body: JSON.stringify({ enabled }),
   })
 }
+
+export function extractErrorMessage(error: unknown): string {
+  return error instanceof ApiError ? error.message : "Something went wrong. Please try again."
+}

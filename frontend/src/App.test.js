@@ -65,3 +65,39 @@ test("a stale plan response does not overwrite the newly selected trip", async (
   assert.doesNotMatch(view.container.textContent, /Which Tokyo\?/, "stale plan must not render under the new trip")
   assert.equal(view.getByRole("button", { name: "Plan itinerary" }).disabled, false)
 })
+
+for (const fails of [false, true]) {
+  test(`trip actions wait for the selected snapshot (failure=${fails})`, async (context) => {
+    const snapshot = deferred()
+    const trip = (id) => ({
+      id, origin: "JFK", destination: id === 1 ? "Tokyo" : "London",
+      destination_airport: id === 1 ? "HND" : "LHR", depart_date: "2030-08-01",
+      return_date: null, age: 30, fitness_level: "high", status: "created",
+      created_at: "2030-01-01T00:00:00Z",
+    })
+    context.mock.method(globalThis, "fetch", async (url) => {
+      const path = new URL(url, "http://localhost").pathname
+      if (path.endsWith("/auth/config")) return response({ enforced: false })
+      if (path === "/api/trips") return response([trip(1), trip(2)])
+      if (path === "/api/trips/1/snapshot") return response({ trip: trip(1), flight_search: null, plan: null })
+      if (path === "/api/trips/2/snapshot") return snapshot.promise
+      throw Error(`unexpected request during switch: ${path}`)
+    })
+    const view = render(createElement(App))
+    await act(async () => {})
+    await act(async () => {})
+    fireEvent.click(view.getByText("Your trips"))
+    await act(async () => fireEvent.click(view.getByText(/HND/)))
+    fireEvent.click(view.getByText("Your trips"))
+    await act(async () => fireEvent.click(view.getByText(/LHR/)))
+    assert.equal(view.queryByText("Plan itinerary"), null)
+    assert.equal(view.queryByText("Search flights"), null)
+    assert.match(view.getByRole("status").textContent, /Loading trip/)
+    await act(async () => snapshot.resolve(fails
+      ? response({ detail: "snapshot unavailable" }, 500)
+      : response({ trip: trip(2), flight_search: null, plan: null })))
+    assert.ok(view.getByText("Plan itinerary"))
+    assert.match(view.container.textContent, fails ? /HND/ : /LHR/)
+    if (fails) assert.match(view.getByRole("alert").textContent, /snapshot unavailable/)
+  })
+}

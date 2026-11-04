@@ -194,7 +194,8 @@ offers store a `departure_token`, not a real `booking_token` (see `_parse_offers
 costs one extra SearchApi call (`_resolve_return_booking_token`) that fetches the return-leg
 options and picks the cheapest — the current UI has no separate return-flight-selection step, so
 this is the same cheapest tie-break the rest of the app already uses. Any failure in that
-resolution returns no booking links, matching the rest of the booking-options failure path.
+resolution, including an empty booking-options response, leaves execution `CONFIRMED` so the user can retry rather
+than creating a terminal `EXECUTED` record without a checkout handoff.
 
 ## Custom Slack HITL adapter over chat-sdk-python
 `app/adapters/slack_hitl.py` hand-rolls signature verification (stdlib `hmac`/`hashlib`) and Block
@@ -225,7 +226,8 @@ already discloses ("your flight hasn't been purchased") what execute does and do
 **What this means for the approver:** clicking Approve in Slack records the human-in-the-loop
 decision — it moves the booking `PENDING_USER_CONFIRMATION → CONFIRMED` — but it doesn't hand back
 checkout links; whoever approved still has to open the app and click Execute to get them. That's a
-two-step, two-surface flow. **Possible extension:**
+two-step, two-surface flow. In-app approval and cancellation remain available even with Slack
+enabled, so a failed notification cannot block the user. **Possible extension:**
 ack Slack immediately, run execute as a background job, and post a follow-up Slack message with the
 checkout links once it completes.
 
@@ -256,9 +258,12 @@ cheap. The one thing kept server-side either way: user-scoping, since that's a s
 not a display preference.
 
 ## Rate limiting protects scarce third-party quota
-`enforce_request_rate_limit` (`app/rate_limit.py`) applies a per-IP request cap plus a process-local
-concurrency cap on real LLM calls, gating `POST /api/trips/{trip_id}/plan` and
-`POST /api/trips/{trip_id}/flights/search`. **Alternative:** no
+`enforce_request_rate_limit` (`app/rate_limit.py`) caps requests by verified certificate device
+identity, falling back to the client IP when gateway verification is absent or invalid.
+Caller-supplied device headers cannot select a device bucket without the gateway secret and
+successful certificate verification. This prevents users behind the gateway from sharing one
+IP bucket. Login also retains a separate normalized-email limit. A process-local concurrency
+cap limits real LLM calls; planning and flight search both have request caps. **Alternative:** no
 limiting, rely on each provider's own rate-limit response. **Rejected** — a burst of retries
 (accidental double-clicks or a buggy client) can consume provider quota before the upstream limit
 responds. This limiter reduces that risk for one running process; it resets on restart and is not
@@ -269,9 +274,13 @@ HITL booking is a checkout-link handoff, not a purchase. The legacy development-
 connector supports one workspace and one approval interaction rather than a general chat-platform
 abstraction.
 
-The security extension adds local password/TOTP authentication, server-backed sessions, and
-application-level tenant/owner checks. Device attestation and network segmentation are not
-implemented; see the trust boundaries in [ARCHITECTURE.md](ARCHITECTURE.md#zero-trust-enterprise-network-overlay).
+The security extension adds local password/TOTP authentication, server-backed sessions,
+application-level tenant/owner checks, certificate-backed device checks, and private application
+and database networks in the isolated deployment. Certificates establish possession of an
+exportable private key; device health, hardware attestation, workload identity, managed
+certificate renewal, and per-certificate revocation remain outside scope. Container builds,
+deployed network isolation, and the gateway TLS handshake remain unverified in the current
+environment; see the trust boundaries in [ARCHITECTURE.md](ARCHITECTURE.md#zero-trust-enterprise-network-overlay).
 
 Not implemented: production identity-provider integration, payment processing, episodic/semantic/
 procedural agent memory, or Saga compensation for a multi-step airline booking. Some code boundaries

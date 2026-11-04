@@ -1,5 +1,4 @@
-"""Derives AgentRun/AgentRunStep rows from a real message history + usage — never fabricated;
-a missing field is left null."""
+"""Derives ordered run steps from real message history; missing fields stay null."""
 
 import json
 
@@ -10,10 +9,8 @@ from pydantic_ai.messages import (
     ToolCallPart,
     ToolReturnPart,
 )
-from pydantic_ai.usage import RunUsage
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import AgentRun, AgentRunStep, AgentStepKind, utcnow
+from app.models import AgentRunStep, AgentStepKind
 
 
 def _duration_ms(start, end) -> int | None:
@@ -102,45 +99,3 @@ def derive_steps(message_history: list[ModelMessage]) -> list[AgentRunStep]:
         previous_timestamp = message.timestamp
 
     return steps
-
-
-async def persist_agent_run(
-    session: AsyncSession,
-    *,
-    trip_request_id: int,
-    model: str,
-    message_history: list[ModelMessage],
-    usage: RunUsage,
-    status: str = "completed",
-    agent_run: AgentRun | None = None,
-) -> AgentRun:
-    """Persist the derived AgentRun + its ordered AgentRunStep rows in one transaction.
-
-    Called on both success and failure (status="failed") — a run that 413'd partway through
-    still leaves whatever steps ran before the crash on the record, not just the eventual
-    success, so the execution panel shows the real run history rather than only the last win.
-    """
-    steps = derive_steps(message_history)
-    total_ms = _duration_ms(
-        message_history[0].timestamp if message_history else None,
-        message_history[-1].timestamp if message_history else None,
-    )
-
-    if agent_run is None:
-        agent_run = AgentRun(trip_request_id=trip_request_id, status=status, model=model)
-    agent_run.status = status
-    agent_run.model = model
-    agent_run.total_input_tokens = usage.input_tokens
-    agent_run.total_output_tokens = usage.output_tokens
-    agent_run.total_ms = total_ms or 0
-    agent_run.finished_at = utcnow()
-    session.add(agent_run)
-    await session.flush()
-    assert agent_run.id is not None, "agent_run must be flushed before steps reference its id"
-
-    for step in steps:
-        step.agent_run_id = agent_run.id
-        session.add(step)
-
-    await session.commit()
-    return agent_run

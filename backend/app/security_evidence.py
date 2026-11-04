@@ -156,9 +156,11 @@ async def record_authentication_failure(
 
 
 async def get_security_events(
-    session: AsyncSession, tenant_id: str, query: SecurityEventQuery
+    session: AsyncSession, tenant_id: str | None, query: SecurityEventQuery
 ) -> list[SecurityEvent]:
-    statement = select(SecurityEvent).where(col(SecurityEvent.tenant_id) == tenant_id)
+    statement = select(SecurityEvent)
+    if tenant_id is not None:
+        statement = statement.where(col(SecurityEvent.tenant_id) == tenant_id)
     if query.actor_user_id is not None:
         statement = statement.where(col(SecurityEvent.actor_user_id) == query.actor_user_id)
     if query.decision is not None:
@@ -177,17 +179,19 @@ async def get_security_events(
     ))
 
 
-async def get_security_event(session: AsyncSession, tenant_id: str, event_id: int) -> SecurityEvent | None:
-    return await session.scalar(select(SecurityEvent).where(
-        col(SecurityEvent.id) == event_id, col(SecurityEvent.tenant_id) == tenant_id,
-    ))
+async def get_security_event(session: AsyncSession, tenant_id: str | None, event_id: int) -> SecurityEvent | None:
+    statement = select(SecurityEvent).where(col(SecurityEvent.id) == event_id)
+    if tenant_id is not None:
+        statement = statement.where(col(SecurityEvent.tenant_id) == tenant_id)
+    return await session.scalar(statement)
 
 
 async def get_security_incidents(
-    session: AsyncSession, tenant_id: str
+    session: AsyncSession, tenant_id: str | None
 ) -> list[SecurityIncident]:
+    statement = select(SecurityIncident)
+    if tenant_id is not None:
+        statement = statement.where(col(SecurityIncident.tenant_id) == tenant_id)
     return list(await session.scalars(
-        select(SecurityIncident)
-        .where(col(SecurityIncident.tenant_id) == tenant_id)
-        .order_by(col(SecurityIncident.created_at).desc())
+        statement.order_by(col(SecurityIncident.created_at).desc())
     ))

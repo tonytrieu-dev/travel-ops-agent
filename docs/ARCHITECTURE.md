@@ -4,7 +4,8 @@
 
 ```mermaid
 flowchart LR
-    UI[React frontend] -->|REST /api| API[FastAPI]
+    UI[React frontend] -->|HTTPS with client certificate| Gateway[Certificate gateway]
+    Gateway -->|REST /api and verified device headers| API[FastAPI]
     API --> Repo[Repositories]
     Repo --> DB[(Postgres 16)]
     API --> Agent[Pydantic AI agent]
@@ -44,16 +45,30 @@ The legacy Slack approval connector is disabled under enforcement. Its shared av
 check prevents callbacks, notifications, and enabling the toggle until Slack users can be mapped
 to application identities and checked for ownership, role, and MFA.
 
-The submitted device identifier is checked against the user, token, and session records. That
-establishes identity consistency; it does not prove device possession, health, or attestation.
-The segment dependency assigns a web/API label and rejects caller-supplied internal-service
-headers. It enforces an application boundary; no network firewall, workload identity, or mTLS
-boundary is implemented. A bearer-token holder can replay the token from another device.
+The enforced deployment in `compose.zero-trust.yml` requires mutual TLS at the HTTPS gateway.
+The gateway validates the client certificate and overwrites the device-verification headers.
+The application checks the gateway secret and matches the certified device ID against the
+account or session during login, MFA, and protected requests. A copied bearer token alone
+cannot satisfy this check; possession of the matching certificate's private key is also required.
+These exportable software keys prove key possession, not device health or hardware attestation.
+A copied token and matching private key can still be replayed.
+
+Only the gateway publishes a host port. It shares a private application network with the
+application, while PostgreSQL is on a separate private database network that the gateway does
+not join. The segment dependency also assigns web/API labels and rejects caller-supplied
+internal-service headers. The loopback development database configuration does not supply these
+deployment controls; see [Running it](../README.md#running-it).
+
+Certificates expire after seven days. Managed renewal and per-certificate revocation are absent;
+urgent certificate revocation requires CA replacement and reissuance. The configuration and
+local certificate issuance have been checked, but container builds, deployed network isolation,
+and the gateway TLS handshake remain unverified in the current environment.
 
 [NIST SP 800-207](https://csrc.nist.gov/pubs/sp/800/207/final) treats authentication and
 authorization as explicit decisions and does not grant trust merely from network location or
-asset ownership. This demo illustrates selected application controls; production device and
-network controls, an enterprise IdP, and independent security assessment remain outside its scope.
+asset ownership. This demo illustrates selected application and deployment controls;
+enterprise device management, workload identity, an enterprise IdP, production validation,
+and independent security assessment remain outside its scope.
 
 ### Where the trust boundary stops: the agent loop
 
@@ -224,8 +239,9 @@ search behavior shared by the route and planner tool.
   total_tokens_limit=MAX_CONTEXT_TOKENS, request_limit=MAX_REQUESTS_PER_RUN)` bounds each loop.
   `UsageLimitExceeded` is mapped to `PlanTooComplexOut` ("too complex for one pass"). Other
   provider and application failures are not covered by that fallback.
-- **Rate limiting** — a per-IP request cap (`RATE_LIMIT_MAX_REQUESTS=10`/
-  `RATE_LIMIT_WINDOW_SECONDS=60` in `app/rate_limit.py`) gates the planning and flight-search
+- **Rate limiting** — a verified-device request cap with a client-IP fallback
+  (`RATE_LIMIT_MAX_REQUESTS=10`/`RATE_LIMIT_WINDOW_SECONDS=60` in `app/rate_limit.py`)
+  gates the planning and flight-search
   routes, `POST /api/trips/{trip_id}/plan` and `POST /api/trips/{trip_id}/flights/search`, separate
   from the `MAX_CONCURRENT_AGENT_RUNS` concurrency slot above: the concurrency slot caps
   simultaneous LLM calls, while this caps request *volume* as observed by one process. The limiter
@@ -256,9 +272,10 @@ catches `UsageLimitExceeded` around that call and turns it into a `PlanTooComple
   return is the wider
 `PlannerOutput` union (`ItineraryOut | ClarificationOut | PlanTooComplexOut`, `app/schemas.py`).
 Every tool call records an `ExecutionEvent`
-through the bound context, and `persist_agent_run` derives
-`AgentRun`/`AgentRunStep` rows from captured message history and usage on both the success and
-handled crash-recovery failure paths. The concurrency slot releases in a `finally`, outside
+through the bound context. The execution-recording module owns run creation and finalization;
+`finish_planner_run` derives steps from captured message history and records usage on both
+success and handled failure paths. Flight search uses the same `finish_run` implementation for
+status, timing, and step persistence. The concurrency slot releases in a `finally`, outside
 the DBOS-wrapped call — see [DECISIONS.md](DECISIONS.md) for why that placement matters.
 `POST /api/trips/{trip_id}/flights/search` (outside the agent loop) still binds its own run through
 the lower-level `execution_context()` directly, since it isn't wrapped in a DBOS workflow.

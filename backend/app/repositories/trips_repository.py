@@ -70,7 +70,7 @@ async def list_trips(session: AsyncSession, user_id: int) -> list[TripRequest]:
         await session.scalars(
             select(TripRequest)
             .where(col(TripRequest.user_id) == user_id)
-            .order_by(col(TripRequest.created_at).desc())
+            .order_by(col(TripRequest.created_at).desc(), col(TripRequest.id).desc())
         )
     )
 
@@ -116,7 +116,7 @@ async def update_trip(session: AsyncSession, trip_id: int, data: TripRequestUpda
         raise TripError(
             ErrorCode.INVALID_TRANSITION,
             409,
-            "This trip has a booking tied to its flight offers; cancel it or start a new trip "
+            "This trip has a booking tied to its flight offers; start a new trip "
             "before changing the route or dates.",
         )
 

@@ -73,23 +73,36 @@ def test_cancellation_committed_after_admission_prevents_transition(
     assert booking_options_spy.calls == 0
 
 
-def test_confirmation_records_the_authenticated_owner_transition(
-    enforced_client, authenticated_booking
+@pytest.mark.parametrize("failure", ["exception", "empty_options"])
+def test_provider_failure_keeps_confirmed_booking_retryable(
+    enforced_client, authenticated_booking, booking_options_spy, failure
 ) -> None:
     booking_id, headers = authenticated_booking
-    response = enforced_client.post(f"/api/bookings/{booking_id}/confirm", headers=headers)
-    assert response.status_code == 200, response.text
-    assert response.json()["state"] == "CONFIRMED"
+    approval = enforced_client.post(f"/api/bookings/{booking_id}/confirm", headers=headers)
+    assert approval.status_code == 200, approval.text
 
+    available_options = booking_options_spy.options
+    booking_options_spy.should_fail = failure == "exception"
+    if failure == "empty_options":
+        booking_options_spy.options = []
+    failed = enforced_client.post(f"/api/bookings/{booking_id}/execute", headers=headers)
+
+    assert failed.status_code == 503, failed.text
+    assert failed.json()["code"] == "booking_options_unavailable"
     history = enforced_client.get(f"/api/bookings/{booking_id}", headers=headers)
     assert history.status_code == 200, history.text
-    [transition] = history.json()["transitions"]
-    assert transition["from_state"] == "PENDING_USER_CONFIRMATION"
-    assert transition["to_state"] == "CONFIRMED"
-    assert transition["reason"] == "confirm"
-    assert transition["actor_email"] == "traveler@tenant-a.test"
-    booking = run_db(lambda session: get_booking(session, booking_id))
-    assert transition["actor_user_id"] == booking.requested_by_user_id
+    assert history.json()["state"] == "CONFIRMED"
+    assert history.json()["booking_reference"] is None
+    assert history.json()["executed_at"] is None
+    assert [row["to_state"] for row in history.json()["transitions"]] == ["CONFIRMED"]
+
+    booking_options_spy.should_fail = False
+    booking_options_spy.options = available_options
+    retried = enforced_client.post(f"/api/bookings/{booking_id}/execute", headers=headers)
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["state"] == "EXECUTED"
+    assert retried.json()["booking_options"] == available_options
+    assert booking_options_spy.calls == 2
 
 
 @pytest.mark.parametrize("quote_age_minutes", [14, 16])

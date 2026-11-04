@@ -35,7 +35,7 @@ async def list_security_events(
     session: AsyncSession = Depends(get_session),
     context: SecurityContext = Depends(get_security_context),
 ) -> list[SecurityEventOut]:
-    events = await get_security_events(session, context.tenant_id, query)
+    events = await get_security_events(session, None if context.role == "platform-operator" else context.tenant_id, query)
     return [SecurityEventOut.model_validate(event) for event in events]
 
 
@@ -48,7 +48,7 @@ async def list_incidents(
     session: AsyncSession = Depends(get_session),
     context: SecurityContext = Depends(get_security_context),
 ) -> list[SecurityIncidentOut]:
-    incidents = await get_security_incidents(session, context.tenant_id)
+    incidents = await get_security_incidents(session, None if context.role == "platform-operator" else context.tenant_id)
     return [SecurityIncidentOut.model_validate(incident) for incident in incidents]
 
 
@@ -76,7 +76,7 @@ async def get_event(
     session: AsyncSession = Depends(get_session),
     context: SecurityContext = Depends(get_security_context),
 ) -> SecurityEventOut:
-    event = await get_security_event(session, context.tenant_id, event_id)
+    event = await get_security_event(session, None if context.role == "platform-operator" else context.tenant_id, event_id)
     if event is None:
         raise HTTPException(status_code=404, detail="Security event not found")
     return SecurityEventOut.model_validate(event)

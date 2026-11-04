@@ -4,7 +4,8 @@ A bounded **zero-trust application prototype**, using a stateful travel planner 
 the protected resource. It demonstrates user/session verification, role and tenant
 access policy, privileged MFA, recorded security decisions, and automatic session
 containment. It is a first implementation toward the enterprise-network project
-objective; device authentication and network micro-segmentation remain gaps.
+objective; the isolated deployment adds certificate possession and private service networks.
+Deployment-level verification still requires Docker.
 
 The planner searches flights and destination activities and proposes an itinerary.
 Booking approval and execution stay outside the model's tools, behind application
@@ -39,8 +40,8 @@ with credentials configured. Slack users are not mapped to trip owners or verifi
 sessions; approve and cancel bookings in the app. The legacy Slack flow is development-only.
 
 Device IDs demonstrate consistency between submitted and stored identity attributes; they do not
-prove device possession or health. Segment checks enforce an application boundary, without
-network segmentation or workload authentication. See the [trust boundaries](docs/ARCHITECTURE.md#zero-trust-enterprise-network-overlay).
+prove device health or hardware attestation. The isolated deployment adds mutual TLS
+and private service networks; see [deployment instructions](#running-it). See the [trust boundaries](docs/ARCHITECTURE.md#zero-trust-enterprise-network-overlay).
 
 ## Start here
 
@@ -63,24 +64,17 @@ independent security audit.
 
 ## Zero-trust demo
 
+Follow [deployment setup](#running-it) first, including the private environment secrets.
+For the synthetic walkthrough, issue both devices before starting the gateway:
+
 ```bash
-docker compose up -d postgres
-cp .env.example .env
-# Set DATABASE_URL in .env to match the Docker service:
-# postgresql+asyncpg://travel_agent:travel_agent@localhost:5432/travel_agent
-# Enforcement is already on by default; optionally set ZERO_TRUST_SIGNING_SECRET for stable tokens.
+python3 deploy/issue-device.py device-a-traveler
+python3 deploy/issue-device.py device-a-operator
+docker compose -f compose.zero-trust.yml up --build -d
+docker compose -f compose.zero-trust.yml run --rm migrate python -m scripts.seed_security_demo
 cd backend
 uv sync
 baml generate
-uv run alembic upgrade head
-uv run python -m scripts.seed_security_demo
-uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
-```
-
-Keep that API terminal running. In a second terminal from the repository root:
-
-```bash
-cd backend
 uv run python -m scripts.security_demo
 ```
 
@@ -88,14 +82,15 @@ Stop API writers while applying migration `5d9f1b3c4e67`; deploy the updated API
 and frontend together. This migration clears fixed-salt password hashes and revokes their sessions.
 It preserves account ownership and modern password hashes. Cleared hashes cannot be
 restored by downgrade; those accounts must enroll a new password.
-For an existing account left with an empty password hash by a security migration,
-run `uv run python -m scripts.enroll_identity --email <existing-account-email>` from
-`backend`. A trusted local database operator must run this command. It prompts for
-and confirms a chosen password without placing it in command arguments. It refuses
-unknown, disabled, or already-enrolled accounts and preserves identity, trip ownership,
-device and MFA settings. It is enrollment, not a password-reset endpoint. Existing
-MFA enrollment must still be available to the owner; the migration's shared demo
-TOTP secret is suitable only for local synthetic accounts.
+For an existing account left with an empty password hash, run
+`uv run python -m scripts.enroll_identity --email <email> --provisioning-file <private-new-file>`
+from `backend` as a trusted database operator. This provisions a unique authenticator and
+revokes previous sessions while preserving ownership and policy. Import the private URI into
+an authenticator and remove the file. Migration `6e0a2c4d8f10` retires the public shared TOTP
+secret and its sessions; already password-enrolled accounts need `--reset-mfa` to provision
+a replacement authenticator. Synthetic demo seeds explicitly retain public demo credentials.
+Login, MFA, and protected requests require the registered client certificate through the
+gateway described in [deployment instructions](#running-it).
 
 The [architecture findings and mini use case](docs/ZERO_TRUST_FINDINGS.md) preserve
 the baseline, implemented changes, before/after evidence, and outstanding review issues.
@@ -112,7 +107,8 @@ For the repeatable PostgreSQL demonstration, including authorized booking, cross
 tampered tokens, revocation, and completed planner exchanges retained after a later model failure, follow
 the [evaluation commands](docs/SECURITY_EVALUATION.md). That harness uses isolated test data and
 stubbed external providers; it does not purchase flights or consume model/search quota.
-Booking-options provider-failure preservation has no regression test and is not a validated guarantee.
+If the booking-options provider is unavailable, execution stays confirmed and the user can retry;
+the app does not create a terminal handoff without checkout links.
 
 ## Security demonstration
 
@@ -300,55 +296,138 @@ provider was selected, see [DECISIONS.md](docs/DECISIONS.md).
 
 ## Running it
 
-### 1. Database
+The enforced deployment uses `compose.zero-trust.yml`. It builds the frontend and backend,
+serves the browser application through an HTTPS gateway, and keeps the API and PostgreSQL
+ports private. Docker with Compose and OpenSSL are required. The original `docker-compose.yml`
+starts only a loopback development database; it does not provide the certificate gateway or
+restricted application role. Existing development database volumes are not copied into the
+isolated stack automatically.
 
-Either Docker or a local Postgres install works.
+### 1. Configure the environment
 
-```bash
-# Docker
-docker compose up -d
-```
-
-or, if you'd rather run Postgres natively (e.g. via Homebrew on macOS), just make sure a
-`travel_agent` database exists and matches the `DATABASE_URL` you set in `.env` below.
-
-### 2. Environment
+From the repository root:
 
 ```bash
 cp .env.example .env
 ```
 
-Fill in `CEREBRAS_API_KEY`, `SEARCHAPI_API_KEY`, and `TAVILY_API_KEY` (links to get each one are
-in the file's comments). Adjust `DATABASE_URL` if you're not using the Docker default.
+Fill in `CEREBRAS_API_KEY`, `SEARCHAPI_API_KEY`, and `TAVILY_API_KEY`. Add these four settings
+to the root `.env`, using a different random value for each:
 
-### 3. Backend
+| Setting | Purpose |
+|---|---|
+| `OWNER_DATABASE_PASSWORD` | Administrative database access for provisioning and migrations |
+| `RUNTIME_DATABASE_PASSWORD` | Restricted database access used by the running API and DBOS |
+| `ZERO_TRUST_SIGNING_SECRET` | Signs application access tokens and keeps them valid across restarts |
+| `DEVICE_GATEWAY_SECRET` | Authenticates the gateway's certificate-verification headers to the API |
 
-Install the [BAML CLI](https://docs.boundaryml.com/guide/installation-language/python)
-and select toolchain 0.23.0 (`baml toolchain use 0.23.0`), matching the locked
-`baml-bridge` runtime. Add its bin directory to PATH. The generated `backend/baml_sdk/`
-is intentionally untracked: run `baml generate` before importing the app, migrations,
-or tests, and regenerate whenever `baml_src/` changes. The quick-start demo above
-also requires this CLI.
+Generate each value separately with `openssl rand -hex 32`. Use the resulting hex strings
+without adding them to source control. Hex avoids special-character escaping in the database
+URL and gateway configuration. Compose supplies the container database URLs and sets
+`FRONTEND_ORIGIN=https://localhost:8443` for this deployment.
 
-```bash
-cd backend
-uv sync
-baml generate
-uv run alembic upgrade head
-uv run uvicorn app.main:app --reload
-```
+### 2. Issue and import device certificates
 
-Backend serves on `http://localhost:8000`; interactive docs at `/docs`.
-
-### 4. Frontend
+An administrator must first confirm the account's registered device ID. Issue a certificate
+for that exact ID from the repository root:
 
 ```bash
-cd frontend
-npm install
-npm run dev
+python3 deploy/issue-device.py <registered-device-id>
 ```
 
-Frontend serves on `http://localhost:5173` (already whitelisted by the backend's CORS config).
+The script creates a local certificate authority, the localhost server certificate, and the
+requested client certificate under the ignored `.device-certificates/` directory. For the
+synthetic walkthrough, issue `device-a-traveler` and `device-a-operator` as shown in the
+[demo commands](#zero-trust-demo).
+
+Import the device's `.p12` file into the browser's client-certificate store, using the password
+in its matching `.password` file. Trust `ca.crt` for the local HTTPS server. Keep private keys
+and password files private, and never distribute `ca.key`: anyone holding that key could issue
+another trusted device certificate. The gateway receives only the CA certificate and its own
+server certificate and key.
+
+The gateway validates the client certificate and overwrites device-identity headers. The API
+checks the gateway secret and matches the certified device ID to the account or session during
+login, MFA, and protected requests. A copied access token alone cannot satisfy this boundary.
+These are exportable software keys, so the check establishes key possession rather than device
+health or hardware attestation.
+
+Device and server certificates expire after seven days. This small deployment has no
+per-certificate revocation service. Urgent revocation requires replacing the CA, reissuing the
+remaining devices, and restarting the gateway. A sustained deployment needs managed certificate
+renewal and revocation.
+
+### 3. Start the isolated stack
+
+```bash
+docker compose -f compose.zero-trust.yml up --build -d
+```
+
+Compose starts PostgreSQL, applies migrations using the owner credential, grants the runtime
+role its permissions, and then starts the API and gateway. The backend image installs BAML
+toolchain 0.23.0 and runs `baml generate`, so the ignored SDK is generated during the build.
+The frontend is built with `/api` as its API URL and served from the same HTTPS origin.
+
+Only the gateway publishes a host port, at `https://localhost:8443`. Gateway and API share an
+internal application network. The API and provisioning containers join the separate database
+network; the gateway does not. The API also has an outbound network for model and search
+provider calls. Keep the API and PostgreSQL ports private when changing this configuration.
+
+The owner password is supplied only to provisioning containers. The runtime role can read and
+append protected audit evidence but cannot update or delete it, truncate its tables, disable
+its triggers, or drop those tables. It owns the DBOS schema so durable execution can initialize
+its system tables without owning the application's tables. Permission grants run after migrations.
+
+### 4. Enroll accounts and verify access
+
+Ordinary accounts must already exist with the intended tenant, role, and device assignment.
+A trusted database operator enrolls an existing account with:
+
+```bash
+docker compose -f compose.zero-trust.yml run --rm migrate python -m scripts.enroll_identity \
+  --email <existing-account-email> --provisioning-file /provisioning/enrollment-uri
+```
+
+The command prompts for a password and writes a unique authenticator provisioning URI to
+`.device-certificates/enrollment-uri` on the host. The file must not already exist. Transfer it
+securely to the account owner, import the URI into an authenticator, and remove the file after
+enrollment. Provisioning preserves the account's ownership and policy and revokes its existing
+sessions. For a password-enrolled account whose shared MFA secret was retired, add `--reset-mfa`
+to rotate its authenticator while preserving its password.
+
+The [synthetic seed command](#zero-trust-demo) is only for a disposable demonstration: its
+accounts deliberately use public passwords and authenticator secrets. Do not use those
+identities for a real deployment.
+
+Open `https://localhost:8443` with the registered client certificate, then sign in and complete
+MFA. Tenant security operators and admins see their own tenant's security evidence. The separate
+`platform-operator` role can investigate cross-tenant events and incidents, including attacks
+that could not be attributed to an authenticated account. Assign that role only through trusted
+administrative account management.
+
+From the repository root, check the deployed boundaries with an issued device ID:
+
+```bash
+sh deploy/check-boundaries.sh <registered-device-id>
+```
+
+The script checks gateway-to-API access, blocks gateway-to-database access, checks certificate
+admission, and verifies audit protections through the API's runtime database credentials.
+The configuration and local certificate issuance have been checked, and a restricted database
+login has passed the audit-protection checks and started DBOS in its own schema. Container
+builds, deployed network isolation, and the gateway TLS handshake remain unverified in the
+current development environment because Docker is unavailable there.
+
+For the authenticated load script, set `TRAVEL_OPS_CA`, `TRAVEL_OPS_CERTIFICATE`, and
+`TRAVEL_OPS_PRIVATE_KEY` to the certificate files, and `TRAVEL_OPS_TOKEN` to the corresponding
+session token. CLI clients validate the server certificate and present their device certificate.
+
+For backend development outside containers, install BAML toolchain 0.23.0, matching the locked
+`baml-bridge` runtime, then run `uv sync` and `baml generate` from `backend`. Regenerate the SDK
+when `baml_src/` changes. A directly started API with enforcement enabled still requires the
+trusted certificate gateway. The legacy frontend development server (`cd frontend && npm install
+&& npm run dev`) listens on port 5173; it does not supply that gateway. Use the isolated stack
+for the enforced browser walkthrough.
 
 ### 5. Tests
 

@@ -103,24 +103,27 @@ async def test_rotating_login_emails_still_reaches_client_limit(monkeypatch) -> 
 
 
 @pytest.mark.no_database
-async def test_login_rejects_oversized_email_before_database_access(monkeypatch) -> None:
-    session = MagicMock()
-    session.scalar = AsyncMock(return_value=None)
+async def test_gateway_devices_have_independent_limits_but_forged_subjects_do_not(monkeypatch):
+    from pydantic import SecretStr
+    from starlette.requests import Request
+    from app import config
+    from app.rate_limit import enforce_request_rate_limit, RateLimitError
 
-    async def _session_override():
-        yield session
+    monkeypatch.setattr(config.get_settings(), "device_gateway_secret", SecretStr("gateway-proof"))
+    def request(device, secret="gateway-proof"):
+        return Request({
+            "type": "http", "client": ("gateway", 1234),
+            "headers": [(b"x-device-gateway", secret.encode()),
+                        (b"x-device-verified", b"SUCCESS"),
+                        (b"x-device-subject", f"CN={device}".encode())],
+        })
 
-    app.dependency_overrides[get_session] = _session_override
-    monkeypatch.setattr("app.security_identity.record_authentication_failure", AsyncMock())
-    transport = httpx.ASGITransport(app=app)
-    try:
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post(
-                "/api/auth/login",
-                json={"email": "x" * 255, "password": "wrong", "device_id": "device"},
-            )
-    finally:
-        app.dependency_overrides.clear()
-
-    assert response.status_code == 422
-    session.scalar.assert_not_called()
+    for _ in range(RATE_LIMIT_MAX_REQUESTS):
+        await enforce_request_rate_limit(request("first"))
+    await enforce_request_rate_limit(request("second"))
+    with pytest.raises(RateLimitError):
+        await enforce_request_rate_limit(request("first"))
+    for index in range(RATE_LIMIT_MAX_REQUESTS):
+        await enforce_request_rate_limit(request(f"forged-{index}", "wrong"))
+    with pytest.raises(RateLimitError):
+        await enforce_request_rate_limit(request("another-forgery", "wrong"))

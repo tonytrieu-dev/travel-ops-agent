@@ -197,12 +197,12 @@ export function BookingModule({ trip, selectedOffer, onSearchAgain }: BookingMod
       {bookingLog?.state === "PENDING_USER_CONFIRMATION" && isSlackApprovalEnabled !== false && (
         <p className="mt-4 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800">
           {isSlackApprovalEnabled
-            ? "Waiting for approval in Slack. Use the Slack message to approve or reject this flight."
+            ? "Slack approvals are enabled. You can also approve or cancel this flight here."
             : "Checking approval channel…"}
         </p>
       )}
 
-      {bookingLog?.state === "PENDING_USER_CONFIRMATION" && !isSlackApprovalEnabled && (
+      {bookingLog?.state === "PENDING_USER_CONFIRMATION" && (
         <div className="mt-4 flex gap-3">
           <button
             type="button"

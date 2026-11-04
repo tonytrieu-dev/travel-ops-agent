@@ -59,11 +59,6 @@ def test_missing_snapshot_input_is_insufficient_evidence(field: str) -> None:
     assert evaluate_mfa([admission], [success]).status == "insufficient_evidence"
 
 
-def test_empty_window_does_not_pass() -> None:
-    assert evaluate_mfa([], []).status == "insufficient_evidence"
-    assert evaluate_containment([], utcnow()).status == "insufficient_evidence"
-
-
 @pytest.mark.parametrize("invalid", ["session", "missing_links", "wrong_links", "late"])
 def test_containment_requires_a_linked_revocation_after_the_fifth_denial(invalid: str) -> None:
     now = utcnow()

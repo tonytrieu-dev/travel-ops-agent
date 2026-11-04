@@ -2,34 +2,20 @@
 
 import argparse
 import asyncio
+import os
 from getpass import getpass
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlmodel import col
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import get_settings
-from app.models import User
-from app.security_identity import password_hash
+from app.repositories.credentials_repository import enroll_identity
 
 
-async def enroll_identity(session: AsyncSession, email: str, password: str) -> None:
-    if not 12 <= len(password) <= 200:
-        raise ValueError("password must contain 12 to 200 characters")
-    user = await session.scalar(select(User).where(col(User.email) == email).with_for_update())
-    if user is None or user.disabled:
-        raise ValueError("enabled existing account required")
-    if user.password_hash:
-        raise ValueError("account is already enrolled")
-    user.password_hash = password_hash(password)
-    await session.commit()
-
-
-async def _enroll(email: str, password: str) -> None:
+async def _enroll(email: str, password: str, *, reset_mfa: bool = False) -> str:
     engine = create_async_engine(get_settings().database_url)
     try:
-        async with async_sessionmaker(engine)() as session:
-            await enroll_identity(session, email, password)
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            return await enroll_identity(session, email, password, reset_mfa=reset_mfa)
     finally:
         await engine.dispose()
 
@@ -37,15 +23,18 @@ async def _enroll(email: str, password: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--email", required=True)
+    parser.add_argument("--reset-mfa", action="store_true", help="Rotate MFA for an enrolled account and revoke sessions")
+    parser.add_argument("--provisioning-file", required=True, help="New private file for the authenticator enrollment URI")
     arguments = parser.parse_args()
-    password = getpass("New password (12–200 characters): ")
-    if password != getpass("Confirm password: "):
+    password = "unused-password" if arguments.reset_mfa else getpass("New password (12–200 characters): ")
+    if not arguments.reset_mfa and password != getpass("Confirm password: "):
         parser.error("passwords do not match")
     try:
-        asyncio.run(_enroll(arguments.email, password))
+        with open(os.open(arguments.provisioning_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as output:
+            output.write(asyncio.run(_enroll(arguments.email, password, reset_mfa=arguments.reset_mfa)) + "\n")
     except ValueError as error:
         parser.error(str(error))
-    print("Account enrolled. Existing device and MFA settings still apply.")
+    print("Account enrolled. Import the private provisioning URI into your authenticator, then delete the file.")
 
 
 if __name__ == "__main__":

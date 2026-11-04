@@ -160,9 +160,8 @@ async def search_trip_flights(
     await repository.get_trip(session, trip_id)
     async with execution_context(
         session, trip_id, run_model=flight_provider_name(provider)
-    ) as agent_run:
-        assert agent_run is not None
-        outcome = await FlightSearchService(session, provider).search(trip_id, agent_run=agent_run)
+    ):
+        outcome = await FlightSearchService(session, provider).search(trip_id, record_run=True)
     return FlightSearchOut(
         offers=[_to_flight_offer_out(offer) for offer in outcome.offers],
         unavailable_reason=outcome.unavailable_reason,

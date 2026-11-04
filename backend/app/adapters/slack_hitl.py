@@ -301,14 +301,19 @@ async def notify_pending_approval(
     blocks = build_approval_blocks(trip, flight, booking)
     try:
         async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
-            await client.post(
+            response = await client.post(
                 "https://slack.com/api/chat.postMessage",
                 headers={
                     "Authorization": f"Bearer {settings.slack_bot_token.get_secret_value()}"
                 },
                 json={"channel": settings.slack_approvals_channel_id, **blocks},
             )
+            if response.is_error or not response.json().get("ok", False):
+                logger.warning(
+                    "Slack chat.postMessage failed for booking=%r: %s", booking.id, response.text
+                )
+                return False
         return True
-    except httpx.HTTPError as error:
+    except (httpx.HTTPError, ValueError) as error:
         logger.warning("slack notify_pending_approval failed: %r for booking=%r", error, booking.id)
         return False

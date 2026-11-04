@@ -43,7 +43,7 @@ def _browser_response(result: TokenOut, request: Request, response: Response) ->
         local_http = request.url.scheme == "http" and request.url.hostname in {"localhost", "127.0.0.1", "::1"}
         response.set_cookie(
             SESSION_COOKIE_NAME, result.access_token, httponly=True,
-            secure=not local_http, samesite="strict", path="/api",
+            secure=posture.enforcement_active() or not local_http, samesite="strict", path="/api",
             expires=result.expires_at,
         )
     return BrowserLoginOut(**result.model_dump())

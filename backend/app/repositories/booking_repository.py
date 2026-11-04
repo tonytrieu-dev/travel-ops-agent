@@ -264,14 +264,20 @@ async def execute_booking(
 
     flight = await session.get(FlightSearchResult, booking.flight_search_result_id)
     assert flight is not None, "booking references a flight row that no longer exists"
-    # The human's confirm-then-execute decision is already real and structural (see
-    # DECISIONS.md); booking_options are supplementary airline/OTA links, not the thing being
-    # gated. An upstream hiccup fetching them must not block the execute itself — degrade
-    # honestly (no links) rather than fabricate a link or block a real, human-confirmed action.
     try:
         booking_options = await fetch_options(flight)
-    except Exception:
-        booking_options = []
+    except Exception as error:
+        raise BookingError(
+            ErrorCode.BOOKING_OPTIONS_UNAVAILABLE,
+            503,
+            "Booking options are temporarily unavailable; please retry.",
+        ) from error
+    if not booking_options:
+        raise BookingError(
+            ErrorCode.BOOKING_OPTIONS_UNAVAILABLE,
+            503,
+            "No booking options are available yet; please retry.",
+        )
     booking.booking_options = booking_options
     booking.booking_reference = f"TA-{booking.id}-{uuid.uuid4().hex[:10].upper()}"
     booking.executed_at = utcnow()

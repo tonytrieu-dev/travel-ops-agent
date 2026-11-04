@@ -1,3 +1,12 @@
+Current implementation update (2026-10-31): ordinary accounts now enroll unique TOTP secrets;
+the public legacy secret is retired by migration. Origin-policy denials are audited without
+attribution, and `platform-operator` can investigate unattributed and cross-tenant security
+evidence. The optional [isolated deployment](../README.md#running-it) adds CA-validated device
+certificates, private networks and a restricted runtime database role. The backend suite
+passes 88 cases; a real restricted database login rejects audit mutation/DDL and starts DBOS
+in its own schema. Docker network isolation and the gateway handshake have not been executed
+in this environment, so the older gap analysis below remains historical deployment evidence.
+
 # Zero-trust evaluation
 
 Historical validation on 2026-10-14 used real PostgreSQL 14.24 in an isolated local cluster, Python 3.13.11,
@@ -14,7 +23,7 @@ reported **0 errors**.
 | Password-only login | Token reaches ordinary routes; booking approval returns 403 for missing MFA | `test_security_integration.py::test_password_only_login_allows_reads_but_not_booking_approval` |
 | MFA-enabled login | Pending token rejected; enrolled legacy owner's verified token reaches original trip | `test_pending_mfa_token_cannot_reach_protected_routes`, `test_enrolled_legacy_owner_can_access_original_trip` |
 | Tampered or expired token | HTTP 401 | Separate signature and expiry regressions in `test_security.py` |
-| Role/MFA escalation | Denied by policy | `test_security.py::test_privileged_action_needs_mfa_and_the_right_role` |
+| Role/MFA escalation | Denied by policy | `test_password_only_login_allows_reads_but_not_booking_approval`, `test_monitoring_requires_operator_mfa_and_hides_other_tenants` |
 | Global execution role boundary | Security operator receives 403 and a persisted `trip.read` denial | `test_global_execution_history_applies_trip_read_role_policy` |
 | Cross-tenant access and containment | Five non-disclosing 404 responses, then 401; incident trigger linked to passing containment assessment | `test_compliance.py::test_cross_tenant_denials_produce_traceable_containment` |
 | Browser internal-segment spoof | HTTP 403 and persisted denial event | `test_segment_spoof_header_is_rejected_as_403_through_the_handler`, security policy tests |
@@ -42,8 +51,8 @@ development-only; it is not a second authenticated approval path.
 The deleted tests were reviewed selectively. Only the failed-planner-run regression and the
 low-fitness intensity boundary were retained from that restoration. The other 21 files remain
 deleted in this PR; this evaluation does not claim their old coverage was replaced. Booking tests
-separate approval, concurrent claims, and fare expiry. There is no booking-options provider-failure
-regression in the current tree, so provider-failure preservation is not a validated guarantee here.
+separate approval, concurrent claims, fare expiry, and provider failure: a failed booking-options
+fetch returns a retryable 503 while preserving the confirmed state.
 Signature rejection remains at the authentication seam instead of adding
 another HTTP test of the same decision.
 
@@ -101,14 +110,18 @@ sample is not a production capacity estimate or a benchmark of authentication cr
 To reproduce enforced-mode latency against a running server, use the standalone load script
 below.
 
-To measure a running server with an already-issued token in `TRAVEL_OPS_TOKEN`, use:
+Follow the [certificate gateway setup](../README.md#running-it) first. Set
+`TRAVEL_OPS_CA`, `TRAVEL_OPS_CERTIFICATE`, and `TRAVEL_OPS_PRIVATE_KEY` to the CA certificate,
+registered device certificate, and its private key. Set `TRAVEL_OPS_TOKEN` to an already-issued
+session token for that same device. From `backend`, run:
 
 ```bash
 uv run python -m scripts.security_load --requests 100 --concurrency 4
 ```
 
-`TRAVEL_OPS_URL` defaults to `http://localhost:8000`. This command measures enforced HTTP latency
-only; it does not change the server's enforcement setting or print the token.
+`TRAVEL_OPS_URL` defaults to `https://localhost:8443`. The client validates the server certificate
+and presents its registered device certificate to the gateway. This command measures enforced
+HTTPS latency; it does not change the server's enforcement setting or print the token.
 
 ## Trust boundaries and limits
 

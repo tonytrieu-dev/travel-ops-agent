@@ -36,6 +36,7 @@ def enforced_client(client, monkeypatch: pytest.MonkeyPatch):
         zero_trust_signing_secret=_SIGNING_SECRET,
     )
     monkeypatch.setattr("app.config.get_settings", lambda: settings)
+    monkeypatch.setattr("app.security_identity.verify_device_certificate", lambda request, device_id: None)
     yield client
 
 
@@ -52,6 +53,7 @@ def _seed_user(
             role=role,
             device_id=device_id,
             password_hash=password_hash("demo-password"),
+            totp_secret="JBSWY3DPEHPK3PXP",
             mfa_enabled=mfa_enabled,
         )
         session.add(user)
@@ -382,14 +384,16 @@ def test_enrolled_legacy_owner_can_access_original_trip(enforced_client) -> None
         "email": "legacy@example.test", "password": "chosen-password", "device_id": "demo-device",
     }).status_code == 401
 
-    from scripts.enroll_identity import enroll_identity
-    run_db(lambda session: enroll_identity(session, "legacy@example.test", "chosen-password"))
+    from app.repositories.credentials_repository import enroll_identity
+    from urllib.parse import parse_qs, urlparse
+    provisioning_uri = run_db(lambda session: enroll_identity(session, "legacy@example.test", "chosen-password"))
+    enrolled_secret = parse_qs(urlparse(provisioning_uri).query)["secret"][0]
     login = enforced_client.post("/api/auth/login", json={
         "email": "legacy@example.test", "password": "chosen-password", "device_id": "demo-device",
     })
     assert login.status_code == 200
     verified = enforced_client.post("/api/auth/mfa", json={
-        "session_id": login.json()["session_id"], "code": totp_code("JBSWY3DPEHPK3PXP"),
+        "session_id": login.json()["session_id"], "code": totp_code(enrolled_secret),
     })
     assert verified.status_code == 200
     headers = {"Authorization": f"Bearer {verified.json()['access_token']}"}
@@ -500,6 +504,18 @@ def test_browser_login_rejects_cross_origin_and_omits_bearer_token(enforced_clie
     assert rejected.status_code == 403
     assert not rejected.cookies
 
+    async def origin_denial(session):
+        from sqlalchemy import select
+        from sqlmodel import col
+        event = await session.scalar(select(SecurityEvent).where(
+            col(SecurityEvent.reason) == "trusted browser origin required"
+        ))
+        assert event is not None
+        assert event.tenant_id == "unknown" and event.actor_user_id is None
+        assert event.session_id is None and event.device_id == "unknown"
+
+    run_db(origin_denial)
+
     accepted = enforced_client.post("/api/auth/browser/login", headers={"Origin": "http://localhost:5173"}, json={
         "email": "browser@example.test", "password": "demo-password", "device_id": "device-a",
     })
@@ -558,3 +574,54 @@ def test_browser_session_revocation_rejects_the_cookie(enforced_client) -> None:
 
     run_db(revoke_browser_session)
     assert enforced_client.get("/api/auth/browser/session").status_code == 401
+
+
+def test_platform_operator_can_investigate_unattributed_attacks(enforced_client) -> None:
+    from app.security_evidence import record_security_event
+
+    async def seed_evidence(session):
+        for tenant in ("unknown", "tenant-b"):
+            for _ in range(5):
+                await record_security_event(session, None, action="auth.authenticate",
+                    resource="identity", decision="deny", reason="authentication failure",
+                    tenant_id=tenant)
+    run_db(seed_evidence)
+    for role in ("admin", "platform-operator"):
+        _seed_user(f"{role}@example.test", "tenant-a", role, role)
+        token = _sign_in(enforced_client, f"{role}@example.test", role)
+        headers = {"Authorization": f"Bearer {token}"}
+        for path in ("events?decision=deny", "incidents"):
+            response = enforced_client.get(f"/api/security/{path}", headers=headers)
+            assert response.status_code == 200, response.text
+            tenants = {item["tenant_id"] for item in response.json()}
+            assert tenants == ({"unknown", "tenant-b"} if role == "platform-operator" else set())
+
+
+def test_copied_token_requires_registered_device(enforced_client, monkeypatch) -> None:
+    from app.security_device import verify_device_certificate
+    from pydantic import SecretStr
+    from app.config import get_settings
+    _seed_user("device@example.test", "tenant-a", "traveler", "device-a")
+    token = _sign_in(enforced_client, "device@example.test", "device-a")
+    get_settings().device_gateway_secret = SecretStr("test-gateway-secret")
+    monkeypatch.setattr("app.security_identity.verify_device_certificate", verify_device_certificate)
+    rejected_login = enforced_client.post("/api/auth/login", json={
+        "email": "device@example.test", "password": "demo-password", "device_id": "device-a",
+    })
+    assert rejected_login.status_code == 401
+    assert rejected_login.json()["detail"] == "registered device certificate required"
+    headers = {"Authorization": f"Bearer {token}"}
+    assert enforced_client.get("/api/trips", headers=headers).status_code == 401
+    headers.update({"x-device-gateway": "test-gateway-secret", "x-device-verified": "SUCCESS", "x-device-subject": "CN=other-device"})
+    assert enforced_client.get("/api/trips", headers=headers).status_code == 401
+    headers["x-device-subject"] = "CN=device-a"
+    assert enforced_client.get("/api/trips", headers=headers).status_code == 200
+    pending = enforced_client.post("/api/auth/login", headers=headers, json={
+        "email": "device@example.test", "password": "demo-password", "device_id": "device-a",
+    })
+    assert pending.status_code == 200
+    rejected_mfa = enforced_client.post("/api/auth/mfa", json={
+        "session_id": pending.json()["session_id"], "code": totp_code("JBSWY3DPEHPK3PXP"),
+    })
+    assert rejected_mfa.status_code == 401
+    assert rejected_mfa.json()["detail"] == "registered device certificate required"

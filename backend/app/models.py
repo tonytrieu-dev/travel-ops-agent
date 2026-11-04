@@ -69,7 +69,7 @@ class User(SQLModel, table=True):
     mfa_enabled: bool = Field(default=True)
     disabled: bool = Field(default=False)
     last_totp_time_step: int | None = Field(default=None)
-    totp_secret: str = Field(default="JBSWY3DPEHPK3PXP")
+    totp_secret: str = Field(default="")
     password_hash: str = Field(default="")
     created_at: datetime = Field(default_factory=utcnow)
 
