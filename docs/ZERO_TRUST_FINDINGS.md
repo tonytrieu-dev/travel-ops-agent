@@ -79,15 +79,15 @@ Implementation paths above are under `backend/app/` unless otherwise stated.
 
 ## Hypotheses and results
 
-Four security hypotheses, each stated as a falsifiable prediction, tested, and given
+Five security hypotheses, each stated as a falsifiable prediction, tested, and given
 an explicit verdict. These are the strongest-evidence claims only: each is a measured
 result or an all-or-nothing guarantee that proves a zero-trust boundary holds (or, for
-H3, held only after a defect the evidence exposed was corrected). Identity, MFA, and
-micro-segmentation coverage is documented in the before/after design table and the
-three-scenario demonstration; it is not restated here as counts. The database-backed
-verdicts (H2, H3) were executed against real PostgreSQL 16.2: the full
+H3, held only after a defect the evidence exposed was corrected). Micro-segmentation
+coverage is documented in the before/after design table and the three-scenario
+demonstration as a declared gap; it is not restated here as a count. The database-backed
+verdicts (H2, H3, H5) were executed against real PostgreSQL 16.2: the full
 `test_append_only`, `test_compliance`, `test_security`, and `test_security_integration`
-suites passed (39 tests), on a rootless local server (`pgserver`) with a `uuid-ossp`
+suites passed (42 tests), on a rootless local server (`pgserver`) with a `uuid-ossp`
 extension shim supplied for the DBOS durable-execution layer's startup migration.
 
 **H1 — Credential hardening (identity and access management).**
@@ -98,7 +98,7 @@ order of tens of milliseconds, bounding a single core to low-tens of guesses per
 pays the same cost as a hit). *Result:* the stable invariant is PBKDF2-HMAC-SHA256,
 600,000 iterations, 16-byte random per-password salt (`password_hash` in
 `security_identity.py`); on our development hardware this measured ≈65–80 ms per
-verification (≈12–15 single-core guesses/s) across runs. *Verdict:* **supported.** The
+verification (≈12–16 single-core guesses/s) across runs. *Verdict:* **supported.** The
 iteration count and salt are the reproducible claim; the wall-clock figure is
 hardware-dependent and illustrative, re-measured per machine.
 
@@ -135,6 +135,19 @@ real PostgreSQL 16.2** (all three regressions passed).
 *Method:* `scripts.token_integrity`, 250 trials × 4 tamper classes (flipped signature,
 forged claims with a reused signature, malformed, empty). *Result:* 1000/1000 tampered
 tokens rejected, 250/250 valid tokens accepted (reproduced). *Verdict:* **supported.**
+
+**H5 — MFA enforcement on privileged actions (multi-factor authentication).**
+*Hypothesis:* a session that has not completed TOTP cannot perform a privileged action,
+while the same identity can still perform ordinary reads. *Prediction:* every privileged
+request from a password-only or pending-MFA session is refused (403), and non-privileged
+reads from a password-only session succeed (200). *Method:* HTTP regressions against real
+PostgreSQL 16.2. *Result:* a password-only session reads `/api/trips` (200) but its
+`booking.confirm` is refused (403, "MFA required"); a pending-MFA token is refused on a
+protected route (403) — the full set of privileged actions is gated, reads are not
+(`test_security_integration.py::test_password_only_login_allows_reads_but_not_booking_approval`,
+`::test_pending_mfa_token_cannot_reach_protected_routes`). *Verdict:* **supported —
+executed against real PostgreSQL 16.2.** This is a pass/fail enforcement count, not a
+timing measurement; it closes the MFA key-area with a test-backed result.
 
 A latency cost was also observed (p50 +4.3 ms, p95 +8.3 ms, −9.5% throughput over a
 100-request in-process sample in `SECURITY_EVALUATION.md`); it is reported as an aside,

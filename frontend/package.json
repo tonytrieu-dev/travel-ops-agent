@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test": "TZ=America/Los_Angeles node --test src/api/client.test.js src/hooks/usePolledResource.test.js src/components/test/selection.test.js src/components/test/dates.test.js src/components/test/activity.test.js src/App.test.js",
+    "test": "TZ=America/Los_Angeles node --test src/api/client.test.js src/hooks/usePolledResource.test.js src/components/test/selection.test.js src/components/test/dates.test.js src/components/test/activity.test.js src/components/test/security.test.js src/App.test.js",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview"
