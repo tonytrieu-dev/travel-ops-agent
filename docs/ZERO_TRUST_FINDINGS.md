@@ -79,12 +79,13 @@ Implementation paths above are under `backend/app/` unless otherwise stated.
 
 ## Hypotheses and results
 
-Five security hypotheses, each stated as a falsifiable prediction, tested, and given
+Six security hypotheses, each stated as a falsifiable prediction, tested, and given
 an explicit verdict. These are the strongest-evidence claims only: each is a measured
-result or an all-or-nothing guarantee that proves a zero-trust boundary holds (or, for
-H3, held only after a defect the evidence exposed was corrected). Micro-segmentation
-coverage is documented in the before/after design table and the three-scenario
-demonstration as a declared gap; it is not restated here as a count. The database-backed
+result, an all-or-nothing guarantee, or a configuration-verified control that proves a
+zero-trust boundary holds (or, for H3, held only after a defect the evidence exposed was
+corrected). All five required key areas now carry a hypothesis: identity/access (H1, H4),
+MFA (H5), continuous monitoring (H2), incident response (H3), and micro-segmentation (H6,
+configuration-verified with runtime pending a Docker daemon). The database-backed
 verdicts (H2, H3, H5) were executed against real PostgreSQL 16.2: the full
 `test_append_only`, `test_compliance`, `test_security`, and `test_security_integration`
 suites passed (42 tests), on a rootless local server (`pgserver`) with a `uuid-ossp`
@@ -148,6 +149,28 @@ protected route (403) — the full set of privileged actions is gated, reads are
 `::test_pending_mfa_token_cannot_reach_protected_routes`). *Verdict:* **supported —
 executed against real PostgreSQL 16.2.** This is a pass/fail enforcement count, not a
 timing measurement; it closes the MFA key-area with a test-backed result.
+
+**H6 — Network micro-segmentation (configuration-verified, runtime pending).**
+*Hypothesis:* the isolated deployment confines each tier to its own private network, so
+the browser-facing gateway cannot reach the database, neither the API nor the database
+is reachable from the host, and the device identity a client presents cannot be forged
+past the gateway. *Prediction:* the compose topology declares internal-only application
+and database networks, publishes exactly one host port (the gateway), keeps the gateway
+off the database network, runs the API under the restricted database role, and has the
+gateway overwrite device-identity headers from the verified client certificate. *Method:*
+static verification of `compose.zero-trust.yml` and `deploy/gateway.conf.template` by
+inspection (the Docker daemon was unreachable in this environment, so runtime packet-drop
+and the TLS handshake were not exercised). *Result (verified by configuration):*
+`application` and `database` networks are both `internal: true`; the `gateway` service
+joins only `[ingress, application]` — not `database`; the sole host binding is
+`127.0.0.1:8443:443` (the API and PostgreSQL publish no host port); the API's
+`DATABASE_URL` uses `travel_runtime` while only provisioning containers use
+`travel_owner`; and the gateway sets `ssl_verify_client on` and *overwrites*
+`X-Device-Verified`/`X-Device-Subject` from `$ssl_client_verify`/`$ssl_client_s_dn`, so a
+client-supplied value cannot reach the API. *Verdict:* **design verified by configuration
+inspection; runtime enforcement (packet isolation, mTLS handshake) unverified pending a
+Docker daemon.** This is the one key area without a running-system measurement; the
+topology and gateway policy are confirmed, the live network behavior is not.
 
 A latency cost was also observed (p50 +4.3 ms, p95 +8.3 ms, −9.5% throughput over a
 100-request in-process sample in `SECURITY_EVALUATION.md`); it is reported as an aside,
