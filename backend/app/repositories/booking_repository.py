@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
-from app.config import BOOKING_TTL_MINUTES
+from app.config import BOOKING_TTL_MINUTES, FLIGHT_CACHE_TTL_MINUTES
 from app.models import (
     BookingTransition,
     FlightSearchResult,
@@ -27,6 +27,7 @@ from app.models import (
     User,
     utcnow,
 )
+from app.request_context import correlation_id
 from app.schemas import ErrorCode
 from app.state import ALLOWED_TRANSITIONS, BookingState, BookingTransitionReason
 
@@ -76,6 +77,7 @@ def _record_transition(
             to_state=to_state,
             reason=reason.value,
             actor_user_id=actor_user_id,
+            correlation_id=correlation_id(),
         )
     )
     booking.state = to_state
@@ -83,7 +85,10 @@ def _record_transition(
 
 async def _lock_booking(session: AsyncSession, log_id: int) -> HITLBookingLog | None:
     result = await session.execute(
-        select(HITLBookingLog).where(col(HITLBookingLog.id) == log_id).with_for_update()
+        select(HITLBookingLog)
+        .where(col(HITLBookingLog.id) == log_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     return result.scalar_one_or_none()
 
@@ -112,11 +117,19 @@ async def request_booking(
     if existing is not None:
         return existing
 
+    if flight.created_at < utcnow() - timedelta(minutes=FLIGHT_CACHE_TTL_MINUTES):
+        raise BookingError(
+            ErrorCode.BOOKING_EXPIRED,
+            409,
+            f"This fare was quoted at {flight.created_at:%Y-%m-%dT%H:%MZ}; "
+            "search again for current prices before requesting a booking.",
+        )
+
     booking = HITLBookingLog(
         trip_request_id=trip_id,
         flight_search_result_id=flight_search_result_id,
         requested_by_user_id=trip.user_id,
-        expires_at=utcnow() + timedelta(minutes=BOOKING_TTL_MINUTES),
+        expires_at=flight.created_at + timedelta(minutes=BOOKING_TTL_MINUTES),
     )
     session.add(booking)
     try:
@@ -251,14 +264,20 @@ async def execute_booking(
 
     flight = await session.get(FlightSearchResult, booking.flight_search_result_id)
     assert flight is not None, "booking references a flight row that no longer exists"
-    # The human's confirm-then-execute decision is already real and structural (see
-    # DECISIONS.md); booking_options are supplementary airline/OTA links, not the thing being
-    # gated. An upstream hiccup fetching them must not block the execute itself — degrade
-    # honestly (no links) rather than fabricate a link or block a real, human-confirmed action.
     try:
         booking_options = await fetch_options(flight)
-    except Exception:
-        booking_options = []
+    except Exception as error:
+        raise BookingError(
+            ErrorCode.BOOKING_OPTIONS_UNAVAILABLE,
+            503,
+            "Booking options are temporarily unavailable; please retry.",
+        ) from error
+    if not booking_options:
+        raise BookingError(
+            ErrorCode.BOOKING_OPTIONS_UNAVAILABLE,
+            503,
+            "No booking options are available yet; please retry.",
+        )
     booking.booking_options = booking_options
     booking.booking_reference = f"TA-{booking.id}-{uuid.uuid4().hex[:10].upper()}"
     booking.executed_at = utcnow()

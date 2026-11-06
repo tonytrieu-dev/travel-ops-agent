@@ -2,11 +2,10 @@
 triggers exist), the FastAPI app wired to it via a synchronous Starlette ``TestClient``, and
 per-test truncation.
 
-Why sync ``TestClient`` rather than an async httpx client: pytest-bdd 8 runs step functions
-synchronously, so the request calls inside steps must be synchronous too. ``TestClient`` drives
-the async app through an anyio portal on a single background event loop — which is exactly what
-makes ``test_double_execute_books_once`` real: two threaded ``execute`` calls become two
-concurrent tasks on that one loop, each with its own DB connection, so the ``SELECT ... FOR
+Why sync ``TestClient`` rather than an async httpx client: route tests make synchronous requests,
+while ``TestClient`` drives the async app through an anyio portal on a single background event
+loop. That is exactly what makes the concurrent execute regression real: two threaded calls become
+two concurrent tasks on that one loop, each with its own DB connection, so the ``SELECT ... FOR
 UPDATE`` in one genuinely blocks the other in Postgres.
 
 Direct DB seeding (a booking already CONFIRMED, or one whose fare has expired) runs through
@@ -19,30 +18,46 @@ import os
 from dataclasses import dataclass, field
 
 import pytest
+from sqlalchemy.engine import make_url
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
+
+def _validate_test_database_url(database_url: str) -> str:
+    parsed_url = make_url(database_url)
+    if "database" in parsed_url.query:
+        raise RuntimeError("TEST_DATABASE_URL must not use a database query parameter")
+    database_name = (parsed_url.database or "").casefold()
+    if not database_name.endswith(("_test", "_testing")):
+        raise RuntimeError("TEST_DATABASE_URL must end with _test or _testing")
+    return database_url
+
+
+TEST_DATABASE_URL = _validate_test_database_url(
+    os.environ.get("TEST_DATABASE_URL", "postgresql+asyncpg://tony@localhost:5432/travel_agent_test")
+)
+os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 
 from app.adapters.flights_searchapi import FlightSearchOutcome, NormalizedFlightOffer
 from app.schemas import ClarificationOut, ItineraryDayOut, ItineraryOut
-from tests.db_helpers import TEST_DATABASE_URL, run_db
-
-# Must run before any ``app.*`` import: ``app.db``/``app.config`` build their engine once from
-# ``DATABASE_URL`` at first import, and ``execute_booking_durable`` (DBOS can't take an injected
-# session) reads that same module-level engine directly, bypassing the FastAPI dependency
-# override below entirely — so the test DB has to be correct at the source, not just at the DI
-# seam.
-os.environ.setdefault("DATABASE_URL", TEST_DATABASE_URL)
+from tests.db_helpers import run_db
 
 _ALL_TABLES = (
     "booking_transition, execution_event, agent_run_step, agent_run, hitl_booking_log, "
-    "itinerary, flight_search_result, trip_request, user_account, connector_setting"
+    "itinerary, flight_search_result, trip_request, user_account, connector_setting, security_event, security_session, security_incident, compliance_assessment"
 )
 
 
 @pytest.fixture(autouse=True)
-def _truncate_between_tests() -> None:
+def _truncate_between_tests(request: pytest.FixtureRequest) -> None:
+    if request.node.get_closest_marker("no_database") is not None:
+        return
     async def _truncate(session: AsyncSession) -> None:
+        for table in ("security_event", "booking_transition", "execution_event", "compliance_assessment"):
+            await session.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER {table}_no_truncate"))
         await session.execute(text(f"TRUNCATE {_ALL_TABLES} RESTART IDENTITY CASCADE"))
+        for table in ("security_event", "booking_transition", "execution_event", "compliance_assessment"):
+            await session.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER {table}_no_truncate"))
 
     run_db(_truncate)
 
@@ -161,7 +176,7 @@ class FlightSearchSpy:
 
 @dataclass
 class PlannerRunSpy:
-    """Stands in for ``run_planner_durable`` so trip-planning tests never spend real LLM
+    """Stands in for the planner runner so trip-planning tests never spend real LLM
     quota, and counts calls so an idempotent /plan can assert the agent ran at most once."""
 
     output: ItineraryOut | ClarificationOut = field(
@@ -177,7 +192,9 @@ class PlannerRunSpy:
     )
     calls: int = 0
 
-    async def __call__(self, trip_id: int, prompt: str) -> ItineraryOut | ClarificationOut:
+    async def __call__(
+        self, trip_id: int, prompt: str, trace_id: str | None = None
+    ) -> ItineraryOut | ClarificationOut:
         self.calls += 1
         return self.output
 
@@ -206,11 +223,19 @@ def client(
 ):
     from starlette.testclient import TestClient
 
-    from app.db import get_engine, get_session
+    from app.db import get_session
     from app.main import app
 
-    app_engine = create_async_engine(TEST_DATABASE_URL, pool_pre_ping=True)
+    async def _idle_monitor():
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("app.main.monitor_security_controls", _idle_monitor)
+
+    # DBOS tests use both the portal and pytest loops; pooled connections cannot cross them.
+    app_engine = create_async_engine(TEST_DATABASE_URL, poolclass=NullPool)
     app_session_factory = async_sessionmaker(app_engine, expire_on_commit=False)
+    monkeypatch.setattr("app.db._engine", app_engine)
+    monkeypatch.setattr("app.db._session_factory", app_session_factory)
 
     async def _override_get_session():
         async with app_session_factory() as session:
@@ -219,13 +244,21 @@ def client(
     app.dependency_overrides[get_session] = _override_get_session
     monkeypatch.setattr("app.dbos_runtime.get_flight_provider", lambda settings: booking_options_spy)
     monkeypatch.setattr("app.routes.trips.get_flight_provider", lambda settings: flight_search_spy)
-    monkeypatch.setattr("app.routes.trips.run_planner_durable", planner_spy)
+    monkeypatch.setattr("app.dbos_runtime._run_planner_agent", planner_spy)
+    # Zero-trust is enforced by default in production; these legacy route tests predate the auth
+    # boundary and exercise trip/booking/rate-limit behavior with unauthenticated requests, so
+    # this fixture runs them unenforced. The enforced path has its own suite (test_security*.py).
+    from app import config
+
+    unenforced = config.Settings(
+        cerebras_api_key="x",
+        searchapi_api_key="x",
+        tavily_api_key="x",
+        database_url=TEST_DATABASE_URL,
+        zero_trust_enforced=False,
+    )
+    monkeypatch.setattr("app.config.get_settings", lambda: unenforced)
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
     asyncio.run(app_engine.dispose())
-    # execute_booking_durable can't take a Depends-injected session (DBOS args must be
-    # serializable), so it opens one from app.db's own module-level engine directly — that
-    # engine's pooled connections would otherwise outlive this test's TestClient portal loop and
-    # get reused on the next test's (different) loop, which asyncpg rejects outright.
-    asyncio.run(get_engine().dispose())

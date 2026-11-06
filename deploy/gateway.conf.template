@@ -1,0 +1,18 @@
+server {
+    listen 443 ssl;
+    server_name localhost;
+    ssl_certificate /certificates/server.crt;
+    ssl_certificate_key /certificates/server.key;
+    ssl_client_certificate /certificates/ca.crt;
+    ssl_verify_client on;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    root /usr/share/nginx/html;
+    location / { try_files $uri /index.html; }
+    location /api/ {
+        proxy_pass http://api:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Device-Gateway "${DEVICE_GATEWAY_SECRET}";
+        proxy_set_header X-Device-Verified $ssl_client_verify;
+        proxy_set_header X-Device-Subject $ssl_client_s_dn;
+    }
+}

@@ -1,8 +1,13 @@
-"""Guards the per-IP rate limit on the two quota-spending routes: the real Nth+1 request over
-the real client, not a value asserted against the limiter's own internals.
-"""
+"""Guards request rate limits through their HTTP boundaries."""
+
+from unittest.mock import AsyncMock, MagicMock
+
+import httpx
+import pytest
 
 from app.config import RATE_LIMIT_MAX_REQUESTS
+from app.db import get_session
+from app.main import app
 from tests.db_helpers import run_db, seed_trip
 
 
@@ -26,3 +31,99 @@ def test_flights_search_is_rate_limited_after_max_requests_from_one_client(clien
     assert "Retry-After" in last_response.headers, (
         "a 429 must tell the client when it's safe to retry"
     )
+
+
+@pytest.mark.no_database
+async def test_repeated_login_failures_are_rate_limited_by_normalized_email_across_clients(
+    monkeypatch,
+) -> None:
+    session = MagicMock()
+    session.scalar = AsyncMock(return_value=None)
+
+    async def _session_override():
+        yield session
+
+    app.dependency_overrides[get_session] = _session_override
+    monkeypatch.setattr("app.security_identity.record_authentication_failure", AsyncMock())
+    try:
+        responses = []
+        for index in range(RATE_LIMIT_MAX_REQUESTS + 1):
+            transport = httpx.ASGITransport(app=app, client=(f"192.0.2.{index + 1}", 12345))
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                responses.append(await client.post(
+                    "/api/auth/login",
+                    json={
+                        "email": "TARGET@EXAMPLE.TEST" if index % 2 else "target@example.test",
+                        "password": "wrong",
+                        "device_id": "guessed-device",
+                    },
+                ))
+    finally:
+        app.dependency_overrides.clear()
+
+    assert [response.status_code for response in responses[:-1]] == [
+        401
+    ] * RATE_LIMIT_MAX_REQUESTS
+    assert responses[-1].status_code == 429
+    assert responses[-1].json()["code"] == "rate_limit_exceeded"
+    assert "Retry-After" in responses[-1].headers
+
+
+@pytest.mark.no_database
+async def test_rotating_login_emails_still_reaches_client_limit(monkeypatch) -> None:
+    session = MagicMock()
+    session.scalar = AsyncMock(return_value=None)
+
+    async def _session_override():
+        yield session
+
+    app.dependency_overrides[get_session] = _session_override
+    monkeypatch.setattr("app.security_identity.record_authentication_failure", AsyncMock())
+    transport = httpx.ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            responses = [
+                await client.post(
+                    "/api/auth/login",
+                    json={
+                        "email": f"rotated-{index}@example.test",
+                        "password": "wrong",
+                        "device_id": "guessed-device",
+                    },
+                )
+                for index in range(RATE_LIMIT_MAX_REQUESTS + 1)
+            ]
+    finally:
+        app.dependency_overrides.clear()
+
+    assert [response.status_code for response in responses[:-1]] == [
+        401
+    ] * RATE_LIMIT_MAX_REQUESTS
+    assert responses[-1].status_code == 429
+
+
+@pytest.mark.no_database
+async def test_gateway_devices_have_independent_limits_but_forged_subjects_do_not(monkeypatch):
+    from pydantic import SecretStr
+    from starlette.requests import Request
+    from app import config
+    from app.rate_limit import enforce_request_rate_limit, RateLimitError
+
+    monkeypatch.setattr(config.get_settings(), "device_gateway_secret", SecretStr("gateway-proof"))
+    def request(device, secret="gateway-proof"):
+        return Request({
+            "type": "http", "client": ("gateway", 1234),
+            "headers": [(b"x-device-gateway", secret.encode()),
+                        (b"x-device-verified", b"SUCCESS"),
+                        (b"x-device-subject", f"CN={device}".encode())],
+        })
+
+    for _ in range(RATE_LIMIT_MAX_REQUESTS):
+        await enforce_request_rate_limit(request("first"))
+    await enforce_request_rate_limit(request("second"))
+    with pytest.raises(RateLimitError):
+        await enforce_request_rate_limit(request("first"))
+    for index in range(RATE_LIMIT_MAX_REQUESTS):
+        await enforce_request_rate_limit(request(f"forged-{index}", "wrong"))
+    with pytest.raises(RateLimitError):
+        await enforce_request_rate_limit(request("another-forgery", "wrong"))

@@ -94,24 +94,17 @@ allow_cross_trip_cache=True`); the planner's tool call is deliberately more cons
 planning run, not a user-facing catalog browse — see the entry right below for where that shared
 logic actually lives.
 
-## Flight search and execution-run lifecycle are extracted services, not inline route/tool logic
-`FlightSearchService` (`app/services/flight_search.py`) and `ExecutionService`/`ExecutionRun`
-(`app/agent/execution_log.py`) sit behind `POST /api/trips/{trip_id}/flights/search`, the
-planner's `search_flights` tool, and the DBOS-wrapped planner run. **Alternative:** leave the
-caching, persistence, and ordering logic inline in `routes/trips.py` and `agent/planner.py`, as it
-originally was. **Rejected** — the
+## Flight search is an extracted service, not duplicated route/tool logic
+`FlightSearchService` (`app/services/flight_search.py`) sits behind
+`POST /api/trips/{trip_id}/flights/search` and the planner's `search_flights` tool.
+**Alternative:** leave the caching, persistence, and ordering logic inline in `routes/trips.py`
+and `agent/planner.py`, as it originally was. **Rejected** — the
 route and the planner tool need the *same* cheapest-first/cache/round-trip-completeness behavior
 (same-trip TTL reuse, cross-trip identical-search reuse, explicit unavailable results) and had
 drifted into two near-duplicate implementations; one service parameterized by
 `persist`/`allow_cross_trip_cache` is the single place that logic can be verified once
 (`test_route_and_planner_tool_modes_agree_on_offer_ordering_and_shape` pins the two callers can't
-silently diverge again). Same reasoning for `ExecutionService`: before the extraction, the DBOS
-workflow and its failure-path cleanup had two separate ways to finalize an `AgentRun`
-(`persist_agent_run` called directly from two branches); `ExecutionRun.persist_result` is now the
-one path, so `_persist_failed_run` and the success path can't fall out of sync on what "finalized"
-means. Both extractions were scoped to change no observable behavior — the full plan and
-task-by-task TDD trail live in
-`docs/superpowers/plans/2026-07-24-flight-search-execution-services.md`.
+silently diverge again).
 
 ## The agent has only two read-only tools
 Only `search_flights` and `web_search` are registered on the planner, both with strict JSON
@@ -201,7 +194,8 @@ offers store a `departure_token`, not a real `booking_token` (see `_parse_offers
 costs one extra SearchApi call (`_resolve_return_booking_token`) that fetches the return-leg
 options and picks the cheapest — the current UI has no separate return-flight-selection step, so
 this is the same cheapest tie-break the rest of the app already uses. Any failure in that
-resolution returns no booking links, matching the rest of the booking-options failure path.
+resolution, including an empty booking-options response, leaves execution `CONFIRMED` so the user can retry rather
+than creating a terminal `EXECUTED` record without a checkout handoff.
 
 ## Custom Slack HITL adapter over chat-sdk-python
 `app/adapters/slack_hitl.py` hand-rolls signature verification (stdlib `hmac`/`hashlib`) and Block
@@ -218,6 +212,10 @@ local development. `ngrok http 8000` is the tunnel used for this (see `docs/SLAC
 no code depends on ngrok specifically, any HTTPS tunnel pointed at port 8000 works the same way.
 
 ## Slack approve only confirms; execute stays in the frontend
+This legacy flow is development-only. Security enforcement disables Slack callbacks and
+notifications because a workspace signature does not authorize the clicking user to mutate
+another traveler's booking. Approvals use the app's ownership, role, and MFA checks instead.
+
 The Slack callback (`routes/slack.py`) calls only `confirm_booking`/`reject_booking`, never
 `execute_booking`. **Alternative:** let Approve in Slack also execute the booking.
 **Rejected** — Slack requires an ack within 3 seconds, and execute calls SearchApi and can take up
@@ -228,7 +226,8 @@ already discloses ("your flight hasn't been purchased") what execute does and do
 **What this means for the approver:** clicking Approve in Slack records the human-in-the-loop
 decision — it moves the booking `PENDING_USER_CONFIRMATION → CONFIRMED` — but it doesn't hand back
 checkout links; whoever approved still has to open the app and click Execute to get them. That's a
-two-step, two-surface flow. **Possible extension:**
+two-step, two-surface flow. In-app approval and cancellation remain available even with Slack
+enabled, so a failed notification cannot block the user. **Possible extension:**
 ack Slack immediately, run execute as a background job, and post a follow-up Slack message with the
 checkout links once it completes.
 
@@ -240,7 +239,7 @@ with the env vars set would silently start posting to Slack; the toggle lets an 
 Slack once and still flip it off at runtime without a restart or an env change.
 
 ## Trip history is a list endpoint plus a global execution feed, not per-trip-only
-`GET /api/trips` lists every trip the (single demo) user owns, newest first; `GET /api/execution`
+`GET /api/trips` lists every trip the authenticated user owns, newest first; `GET /api/execution`
 mirrors that scoping across every `AgentRun` those trips own, also newest first — both live in
 `trips_repository.py` next to the existing per-trip `get_trip`/`get_execution_panel`, sharing the
 same user-scoping query rather than introducing a second concept. **Why global execution, not just
@@ -259,18 +258,30 @@ cheap. The one thing kept server-side either way: user-scoping, since that's a s
 not a display preference.
 
 ## Rate limiting protects scarce third-party quota
-`enforce_request_rate_limit` (`app/rate_limit.py`) applies a per-IP request cap plus a process-local
-concurrency cap on real LLM calls, gating `POST /api/trips/{trip_id}/plan` and
-`POST /api/trips/{trip_id}/flights/search`. **Alternative:** no
+`enforce_request_rate_limit` (`app/rate_limit.py`) caps requests by verified certificate device
+identity, falling back to the client IP when gateway verification is absent or invalid.
+Caller-supplied device headers cannot select a device bucket without the gateway secret and
+successful certificate verification. This prevents users behind the gateway from sharing one
+IP bucket. Login also retains a separate normalized-email limit. A process-local concurrency
+cap limits real LLM calls; planning and flight search both have request caps. **Alternative:** no
 limiting, rely on each provider's own rate-limit response. **Rejected** — a burst of retries
 (accidental double-clicks or a buggy client) can consume provider quota before the upstream limit
 responds. This limiter reduces that risk for one running process; it resets on restart and is not
 a distributed quota-control mechanism.
 
 ## Current scope and deferred work
-HITL booking is a checkout-link handoff, not a purchase. The optional Slack connector supports one
-workspace and one approval interaction rather than a general chat-platform abstraction.
+HITL booking is a checkout-link handoff, not a purchase. The legacy development-only Slack
+connector supports one workspace and one approval interaction rather than a general chat-platform
+abstraction.
 
-Not implemented: authentication, multi-user isolation, payment processing, episodic/semantic/
+The security extension adds local password/TOTP authentication, server-backed sessions,
+application-level tenant/owner checks, certificate-backed device checks, and private application
+and database networks in the isolated deployment. Certificates establish possession of an
+exportable private key; device health, hardware attestation, workload identity, managed
+certificate renewal, and per-certificate revocation remain outside scope. Container builds,
+deployed network isolation, and the gateway TLS handshake remain unverified in the current
+environment; see the trust boundaries in [ARCHITECTURE.md](ARCHITECTURE.md#zero-trust-enterprise-network-overlay).
+
+Not implemented: production identity-provider integration, payment processing, episodic/semantic/
 procedural agent memory, or Saga compensation for a multi-step airline booking. Some code boundaries
 could support those changes, but their implementation effort and behavior have not been validated.

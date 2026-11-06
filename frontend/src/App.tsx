@@ -1,37 +1,91 @@
-import { useCallback, useEffect, useState } from "react"
+import { useEffect, useState } from "react"
 import {
-  ApiError,
-  createTrip,
-  getTripSnapshot,
-  listTrips,
-  planTrip,
-  searchTripFlights,
-  updateTrip,
+  AUTHENTICATION_REQUIRED_EVENT,
+  SESSION_CHANGED_STORAGE_KEY,
+  getBrowserSession,
+  getAuthConfig,
+  login,
+  verifyMfa,
+  extractErrorMessage,
 } from "./api/client"
-import type {
-  FlightOfferOut,
-  FlightSearchOut,
-  PlanOut,
-  TripRequestCreate,
-  TripRequestOut,
-} from "./api/types"
 import { ApprovalHistoryPanel } from "./components/ApprovalHistoryPanel"
 import { BookingModule } from "./components/BookingModule"
 import { ConnectorsPanel } from "./components/ConnectorsPanel"
+import { CompliancePanel } from "./components/CompliancePanel"
 import { ExecutionPanel } from "./components/ExecutionPanel"
 import { FlightSearch } from "./components/FlightSearch"
-import { ItineraryPanel, type ClarificationAnswers } from "./components/ItineraryPanel"
+import { ItineraryPanel } from "./components/ItineraryPanel"
 import { LiveActivity } from "./components/LiveActivity"
 import { Questionnaire } from "./components/Questionnaire"
+import { useActiveTrip } from "./hooks/useActiveTrip"
 import { YourTripsPanel } from "./components/YourTripsPanel"
 
-function extractErrorMessage(error: unknown): string {
-  return error instanceof ApiError ? error.message : "Something went wrong. Please try again."
+export function LoginPanel({ onAuthenticated }: { onAuthenticated: () => void }) {
+  const [email, setEmail] = useState("traveler@tenant-a.test")
+  const [password, setPassword] = useState("")
+  const [deviceId, setDeviceId] = useState("device-a-traveler")
+  const [sessionId, setSessionId] = useState<string | null>(null)
+  const [code, setCode] = useState("")
+  const [error, setError] = useState<string | null>(null)
+
+  const submitLogin = async (event: React.FormEvent) => {
+    event.preventDefault()
+    setError(null)
+    try {
+      const result = await login(email, password, deviceId)
+      if (result.mfa_required) setSessionId(result.session_id)
+      else onAuthenticated()
+    } catch (error) {
+      setError(extractErrorMessage(error))
+    }
+  }
+
+  const submitMfa = async (event: React.FormEvent) => {
+    event.preventDefault()
+    if (!sessionId) return
+    setError(null)
+    try {
+      await verifyMfa(sessionId, code)
+      onAuthenticated()
+    } catch (error) {
+      setError(extractErrorMessage(error))
+    }
+  }
+
+  // Without this, an expired or revoked MFA session traps the form resubmitting a dead session.
+  const restartSignIn = () => {
+    setSessionId(null)
+    setCode("")
+    setError(null)
+  }
+
+  return (
+    <main className="flex min-h-screen items-center justify-center bg-slate-50 p-6">
+      <form onSubmit={sessionId ? submitMfa : submitLogin} className="w-full max-w-sm space-y-4 rounded-xl bg-white p-6 shadow">
+        <h1 className="text-2xl font-bold">Travel Agent sign in</h1>
+        {!sessionId ? (
+          <>
+            <input aria-label="Email" required type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Email" className="w-full rounded border p-2" />
+            <input aria-label="Password" required type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Password" className="w-full rounded border p-2" />
+            <input aria-label="Device" required value={deviceId} onChange={(event) => setDeviceId(event.target.value)} placeholder="Device ID" className="w-full rounded border p-2" />
+            <button type="submit" className="w-full rounded bg-indigo-600 p-2 text-white">Continue to MFA</button>
+          </>
+        ) : (
+          <>
+            <label className="block text-sm">Enter your authenticator code
+              <input aria-label="MFA code" required inputMode="numeric" value={code} onChange={(event) => setCode(event.target.value)} className="mt-1 w-full rounded border p-2" />
+            </label>
+            <button type="submit" className="w-full rounded bg-indigo-600 p-2 text-white">Verify and sign in</button>
+            <button type="button" onClick={restartSignIn} className="w-full rounded border border-slate-300 p-2 text-sm text-slate-600">Start over</button>
+          </>
+        )}
+        {error && <p role="alert" className="text-sm text-red-600">{error}</p>}
+      </form>
+    </main>
+  )
 }
 
-const ACTIVE_TRIP_ID_STORAGE_KEY = "travel-agent.activeTripId"
-
-type TabKey = "trip" | "trips" | "execution" | "approvals" | "connectors"
+type TabKey = "trip" | "trips" | "execution" | "approvals" | "connectors" | "compliance"
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: "trip", label: "Plan a trip" },
@@ -39,150 +93,63 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: "execution", label: "Agent execution history" },
   { key: "approvals", label: "Approval history" },
   { key: "connectors", label: "Connectors" },
+  { key: "compliance", label: "Security monitoring" },
 ]
 
 function App() {
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null)
   const [activeTab, setActiveTab] = useState<TabKey>("trip")
 
-  const [trip, setTrip] = useState<TripRequestOut | null>(null)
-  const [isCreatingTrip, setIsCreatingTrip] = useState(false)
-  const [createTripError, setCreateTripError] = useState<string | null>(null)
-
-  const [trips, setTrips] = useState<TripRequestOut[]>([])
-
-  const [flightSearchResult, setFlightSearchResult] = useState<FlightSearchOut | null>(null)
-  const [isSearchingFlights, setIsSearchingFlights] = useState(false)
-  const [flightSearchError, setFlightSearchError] = useState<string | null>(null)
-  const [selectedOffer, setSelectedOffer] = useState<FlightOfferOut | null>(null)
-
-  const [planResult, setPlanResult] = useState<PlanOut | null>(null)
-  const [isPlanning, setIsPlanning] = useState(false)
-  const [planError, setPlanError] = useState<string | null>(null)
-
-  const isRunActive = isSearchingFlights || isPlanning
-
-  // Shared by the hard-refresh restore below and by clicking a trip in the sidebar list — both
-  // need to load a trip's snapshot into state and remember it as the active trip.
-  const restoreTrip = useCallback((tripId: number) => {
-    return getTripSnapshot(tripId).then((snapshot) => {
-      setTrip(snapshot.trip)
-      setFlightSearchResult(snapshot.flight_search)
-      setPlanResult(snapshot.plan)
-      localStorage.setItem(ACTIVE_TRIP_ID_STORAGE_KEY, String(tripId))
-    })
-  }, [])
-
-  // Restore the active trip after a hard refresh so the execution history survives — React state
-  // alone would lose the trip id and leave the ExecutionPanel with nothing to re-fetch.
-  useEffect(() => {
-    const storedTripId = localStorage.getItem(ACTIVE_TRIP_ID_STORAGE_KEY)
-    if (!storedTripId) return
-    restoreTrip(Number(storedTripId)).catch(() =>
-      localStorage.removeItem(ACTIVE_TRIP_ID_STORAGE_KEY),
-    )
-  }, [restoreTrip])
+  const {
+    trip,
+    isRestoringTrip,
+    restoreTripError,
+    isCreatingTrip,
+    createTripError,
+    trips,
+    flightSearchResult,
+    isSearchingFlights,
+    flightSearchError,
+    selectedOffer,
+    setSelectedOffer,
+    planResult,
+    isPlanning,
+    planError,
+    isRunActive,
+    handleCreateTrip,
+    handleSearchFlights,
+    handleStartNewSearch,
+    handleRequestPlan,
+    handleAnswerClarification,
+    handleSearchAgain,
+    handleSelectTrip,
+  } = useActiveTrip(isAuthenticated)
 
   useEffect(() => {
-    listTrips()
-      .then(setTrips)
-      .catch(() => {})
+    const requireAuthentication = () => window.location.reload()
+    const sessionChanged = (event: StorageEvent) => {
+      if (event.storageArea === localStorage && event.key === SESSION_CHANGED_STORAGE_KEY && event.newValue)
+        window.location.reload()
+    }
+    window.addEventListener(AUTHENTICATION_REQUIRED_EVENT, requireAuthentication)
+    window.addEventListener("storage", sessionChanged)
+    return () => {
+      window.removeEventListener(AUTHENTICATION_REQUIRED_EVENT, requireAuthentication)
+      window.removeEventListener("storage", sessionChanged)
+    }
   }, [])
 
-  const handleCreateTrip = async (tripRequestCreate: TripRequestCreate) => {
-    setIsCreatingTrip(true)
-    setCreateTripError(null)
-    try {
-      const createdTrip = await createTrip(tripRequestCreate)
-      setTrip(createdTrip)
-      localStorage.setItem(ACTIVE_TRIP_ID_STORAGE_KEY, String(createdTrip.id))
-      setTrips((previousTrips) => [createdTrip, ...previousTrips])
-    } catch (error) {
-      setCreateTripError(extractErrorMessage(error))
-    } finally {
-      setIsCreatingTrip(false)
-    }
-  }
+  useEffect(() => {
+    getAuthConfig()
+      .then(async ({ enforced }) => {
+        if (enforced) await getBrowserSession()
+        setIsAuthenticated(true)
+      })
+      .catch(() => setIsAuthenticated(false))
+  }, [])
 
-  const handleSearchFlights = async () => {
-    if (!trip) return
-    setIsSearchingFlights(true)
-    setFlightSearchError(null)
-    setSelectedOffer(null)
-    try {
-      setFlightSearchResult(await searchTripFlights(trip.id))
-    } catch (error) {
-      setFlightSearchError(extractErrorMessage(error))
-    } finally {
-      setIsSearchingFlights(false)
-    }
-  }
-
-  // Drops the current trip entirely so the Questionnaire renders fresh — the only way back to
-  // the input form once a trip exists, for a traveler who wants to search a different flight.
-  const handleStartNewSearch = () => {
-    localStorage.removeItem(ACTIVE_TRIP_ID_STORAGE_KEY)
-    setTrip(null)
-    clearFlightAndBookingState()
-    setPlanResult(null)
-    setPlanError(null)
-  }
-
-  const handleRequestPlan = async () => {
-    if (!trip) return
-    setIsPlanning(true)
-    setPlanError(null)
-    try {
-      const planOutcome = await planTrip(trip.id)
-      setPlanResult(planOutcome)
-      if (planOutcome.status === "needs_clarification" || planOutcome.status === "too_complex")
-        clearFlightAndBookingState()
-    } catch (error) {
-      setPlanError(extractErrorMessage(error))
-    } finally {
-      setIsPlanning(false)
-    }
-  }
-
-  const handleAnswerClarification = async (answers: ClarificationAnswers) => {
-    if (!trip) return
-    setIsPlanning(true)
-    setPlanError(null)
-    try {
-      const updatedTrip = await updateTrip(trip.id, answers)
-      setTrip(updatedTrip)
-      localStorage.setItem(ACTIVE_TRIP_ID_STORAGE_KEY, String(updatedTrip.id))
-      const planOutcome = await planTrip(trip.id)
-      setPlanResult(planOutcome)
-      if (planOutcome.status === "needs_clarification" || planOutcome.status === "too_complex")
-        clearFlightAndBookingState()
-    } catch (error) {
-      setPlanError(extractErrorMessage(error))
-    } finally {
-      setIsPlanning(false)
-    }
-  }
-
-  const handleSearchAgain = () => {
-    setSelectedOffer(null)
-  }
-
-  const handleSelectTrip = (tripId: number) => {
-    if (trip?.id === tripId) return
-    clearFlightAndBookingState()
-    setPlanResult(null)
-    setPlanError(null)
-    restoreTrip(tripId)
-    setActiveTab("trip")
-  }
-
-  // When a re-plan comes back needing clarification, the trip has effectively changed — drop any
-  // flight results, selection, and (via BookingModule's remount key) booking state so the UI never
-  // shows offers or a booking tied to the now-stale trip.
-  const clearFlightAndBookingState = () => {
-    setFlightSearchResult(null)
-    setSelectedOffer(null)
-    setFlightSearchError(null)
-  }
+  if (isAuthenticated === null) return null
+  if (!isAuthenticated) return <LoginPanel onAuthenticated={() => setIsAuthenticated(true)} />
 
   return (
     <div className="flex min-h-screen flex-col bg-slate-50 text-slate-900 md:flex-row">
@@ -230,7 +197,9 @@ function App() {
         <main className="mx-auto w-full max-w-3xl flex-1 space-y-6 px-6 py-8">
           {activeTab === "trip" && (
             <>
-              {!trip && (
+              {restoreTripError && <p role="alert">{restoreTripError}</p>}
+              {isRestoringTrip && <p role="status">Loading trip…</p>}
+              {!trip && !isRestoringTrip && (
                 <Questionnaire
                   onSubmit={handleCreateTrip}
                   isSubmitting={isCreatingTrip}
@@ -238,7 +207,7 @@ function App() {
                 />
               )}
 
-              {trip && (
+              {trip && !isRestoringTrip && (
                 <>
                   <FlightSearch
                     trip={trip}
@@ -277,7 +246,7 @@ function App() {
             <YourTripsPanel
               trips={trips}
               selectedTripId={trip?.id ?? null}
-              onSelectTrip={handleSelectTrip}
+              onSelectTrip={(tripId) => { handleSelectTrip(tripId); setActiveTab("trip") }}
             />
           )}
 
@@ -288,6 +257,7 @@ function App() {
           )}
 
           {activeTab === "connectors" && <ConnectorsPanel />}
+          {activeTab === "compliance" && <CompliancePanel />}
         </main>
 
         <footer className="mt-10 border-t border-slate-200 py-6 text-center text-xs text-slate-400">

@@ -1,0 +1,10 @@
+FROM node:24-bookworm-slim AS frontend
+WORKDIR /application
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+ENV VITE_API_BASE_URL=/api
+RUN npm run build
+FROM nginx:stable-alpine
+COPY --from=frontend /application/dist /usr/share/nginx/html
+COPY deploy/gateway.conf.template /etc/nginx/templates/default.conf.template

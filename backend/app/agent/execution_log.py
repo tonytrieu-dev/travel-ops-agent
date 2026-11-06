@@ -8,15 +8,18 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
+from pydantic_ai.messages import ModelMessage
 from pydantic_ai.usage import RunUsage
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
-from app.agent.observability import persist_agent_run
-from app.models import AgentRun, ExecutionEvent, ExecutionEventKind, TripRequest, utcnow
+from app.agent.observability import derive_steps
+from app.models import AgentRun, AgentRunStep, ExecutionEvent, ExecutionEventKind, TripRequest, utcnow
+from app.request_context import bind_correlation_id, correlation_id
 
 
 @dataclass
@@ -34,39 +37,35 @@ _current: ContextVar[_ExecutionContext | None] = ContextVar("execution_context",
 
 @asynccontextmanager
 async def execution_context(
-    session: AsyncSession, trip_request_id: int, *, run_model: str | None = None
+    session: AsyncSession, trip_request_id: int, *, run_model: str | None = None, correlation: str | None = None
 ) -> AsyncIterator[AgentRun | None]:
     """Bind one execution so its append-only events retain both trip and run ownership."""
-    agent_run = (
-        AgentRun(trip_request_id=trip_request_id, status="running", model=run_model)
-        if run_model is not None
-        else None
-    )
-    if agent_run is not None:
-        session.add(agent_run)
-        await session.commit()
-        assert agent_run.id is not None
-
-    token = _current.set(
-        _ExecutionContext(
-            session=session,
-            trip_request_id=trip_request_id,
-            agent_run=agent_run,
+    with bind_correlation_id(correlation or correlation_id()):
+        agent_run = (
+            AgentRun(trip_request_id=trip_request_id, status="running", model=run_model)
+            if run_model is not None
+            else None
         )
-    )
-    try:
-        yield agent_run
-    except Exception:
-        if agent_run is not None and agent_run.status == "running":
-            agent_run.status = "failed"
-            agent_run.finished_at = utcnow()
-            agent_run.total_ms = round(
-                (agent_run.finished_at - agent_run.started_at).total_seconds() * 1000
-            )
+        if agent_run is not None:
+            session.add(agent_run)
             await session.commit()
-        raise
-    finally:
-        _current.reset(token)
+            assert agent_run.id is not None
+
+        token = _current.set(
+            _ExecutionContext(
+                session=session,
+                trip_request_id=trip_request_id,
+                agent_run=agent_run,
+            )
+        )
+        try:
+            yield agent_run
+        except Exception:
+            if agent_run is not None and agent_run.status == "running":
+                await finish_run("failed")
+            raise
+        finally:
+            _current.reset(token)
 
 
 def _bound_context(caller_name: str) -> _ExecutionContext:
@@ -121,41 +120,50 @@ async def record_event(
                 detail=detail,
                 duration_ms=duration_ms,
                 data=data,
+                correlation_id=correlation_id(),
             )
         )
         await context.session.commit()
 
 
-@dataclass
-class ExecutionRun:
-    """The narrow surface callers need once bound inside an ExecutionService run — everything
-    else (ContextVar plumbing, event-sequence allocation, per-run locking) stays hidden in
-    execution_context()."""
+async def finish_run(
+    status: str,
+    *,
+    steps: list[AgentRunStep] | None = None,
+    total_ms: int | None = None,
+    started_at: datetime | None = None,
+    usage: RunUsage | None = None,
+) -> None:
+    context = _bound_context("finish_run")
+    agent_run = context.agent_run
+    if agent_run is None:
+        raise RuntimeError("finish_run requires an execution context with a run")
+    finished_at = utcnow()
+    agent_run.status = status
+    if started_at is not None:
+        agent_run.started_at = started_at
+    agent_run.finished_at = finished_at
+    agent_run.total_ms = (
+        total_ms if total_ms is not None
+        else round((finished_at - agent_run.started_at).total_seconds() * 1000)
+    )
+    if usage is not None:
+        agent_run.total_input_tokens = usage.input_tokens
+        agent_run.total_output_tokens = usage.output_tokens
+    assert agent_run.id is not None
+    for step in steps or []:
+        step.agent_run_id = agent_run.id
+        context.session.add(step)
+    await context.session.commit()
 
-    agent_run: AgentRun | None
 
-    async def persist_result(
-        self, *, message_history: list[Any], usage: RunUsage, status: str = "completed"
-    ) -> AgentRun:
-        context = _bound_context("ExecutionRun.persist_result")
-        return await persist_agent_run(
-            context.session,
-            trip_request_id=context.trip_request_id,
-            model=context.agent_run.model if context.agent_run is not None else "unknown",
-            message_history=message_history,
-            usage=usage,
-            status=status,
-            agent_run=context.agent_run,
-        )
-
-
-class ExecutionService:
-    def __init__(self, session: AsyncSession) -> None:
-        self._session = session
-
-    @asynccontextmanager
-    async def start_run(
-        self, trip_id: int, *, model: str | None = None
-    ) -> AsyncIterator[ExecutionRun]:
-        async with execution_context(self._session, trip_id, run_model=model) as agent_run:
-            yield ExecutionRun(agent_run=agent_run)
+async def finish_planner_run(
+    message_history: list[ModelMessage], usage: RunUsage, *, status: str = "completed",
+) -> None:
+    started_at = message_history[0].timestamp if message_history else None
+    finished_at = message_history[-1].timestamp if message_history else None
+    total_ms = (
+        round((finished_at - started_at).total_seconds() * 1000)
+        if started_at is not None and finished_at is not None else 0
+    )
+    await finish_run(status, steps=derive_steps(message_history), total_ms=total_ms, usage=usage)

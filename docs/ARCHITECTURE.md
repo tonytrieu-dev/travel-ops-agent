@@ -4,7 +4,8 @@
 
 ```mermaid
 flowchart LR
-    UI[React frontend] -->|REST /api| API[FastAPI]
+    UI[React frontend] -->|HTTPS with client certificate| Gateway[Certificate gateway]
+    Gateway -->|REST /api and verified device headers| API[FastAPI]
     API --> Repo[Repositories]
     Repo --> DB[(Postgres 16)]
     API --> Agent[Pydantic AI agent]
@@ -17,9 +18,91 @@ flowchart LR
     DBOS -.->|execute_booking_durable wraps| Repo
     DBOS --> DB
     API -->|/api/connectors| ConnSetting[(connector_setting)]
-    API -->|notify_pending_approval| Slack[(Slack)]
-    Slack -->|/api/slack/interactions| API
+    API -->|development only; enforcement off| Slack[(Legacy Slack)]
+    Slack -->|signed callback; enforcement off| API
 ```
+
+## Zero-trust enterprise-network overlay
+
+The application is a small, container-friendly zero-trust API-boundary demonstration. A request
+carries a short-lived signed identity bound to a server-side session and device identifier; the API checks
+tenant, role, MFA, revocation, and resource ownership before admitting it from the web boundary.
+
+The security control plane covers the five areas an enterprise zero-trust model has to address:
+
+- **Identity and access management:** tenant, role, device, and disabled-identity attributes are
+  persisted and checked server-side.
+- **MFA:** the local demo upgrades a pending session only after validating a TOTP code.
+- **API segmentation:** protected routes admit authenticated web requests through one explicit
+  boundary rather than assuming internal-network trust.
+- **Continuous monitoring:** each admitted request is persisted as an append-only
+  `security_event` with actor, device, segments, action, decision, reason, and correlation ID.
+- **Incident response:** repeated denials automatically create an incident and revoke the
+  affected session; security operators have read-only event and incident queries over the
+  retained evidence.
+
+The legacy Slack approval connector is disabled under enforcement. Its shared availability
+check prevents callbacks, notifications, and enabling the toggle until Slack users can be mapped
+to application identities and checked for ownership, role, and MFA.
+
+The enforced deployment in `compose.zero-trust.yml` requires mutual TLS at the HTTPS gateway.
+The gateway validates the client certificate and overwrites the device-verification headers.
+The application checks the gateway secret and matches the certified device ID against the
+account or session during login, MFA, and protected requests. A copied bearer token alone
+cannot satisfy this check; possession of the matching certificate's private key is also required.
+These exportable software keys prove key possession, not device health or hardware attestation.
+A copied token and matching private key can still be replayed.
+
+Only the gateway publishes a host port. It shares a private application network with the
+application, while PostgreSQL is on a separate private database network that the gateway does
+not join. The segment dependency also assigns web/API labels and rejects caller-supplied
+internal-service headers. The loopback development database configuration does not supply these
+deployment controls; see [Running it](../README.md#running-it).
+
+Certificates expire after seven days. Managed renewal and per-certificate revocation are absent;
+urgent certificate revocation requires CA replacement and reissuance. The configuration and
+local certificate issuance have been checked, but container builds, deployed network isolation,
+and the gateway TLS handshake remain unverified in the current environment.
+
+[NIST SP 800-207](https://csrc.nist.gov/pubs/sp/800/207/final) treats authentication and
+authorization as explicit decisions and does not grant trust merely from network location or
+asset ownership. This demo illustrates selected application and deployment controls;
+enterprise device management, workload identity, an enterprise IdP, production validation,
+and independent security assessment remain outside its scope.
+
+### Where the trust boundary stops: the agent loop
+
+Zero-trust verification happens at two places: the HTTP edge (every protected route) and the
+booking state machine (every transition). It does **not** continue inside the planner's tool loop.
+When a `/plan` request is admitted, it crosses into the durable workflow as three serializable
+values — `trip_id`, `prompt`, `trace_id` — and the verified `SecurityContext` is left at the edge.
+`PlannerDeps` carries the flight and activity providers and the traveler's fitness level, not an
+identity. So the model's tool calls run with the harness's ambient authority, not the caller's:
+there is no per-tool-call re-authorization, and no tenant/role check inside the loop.
+
+That is a deliberate posture, not an oversight. The loop is safe because the agent is kept
+powerless, not because it is continuously verified. Two design choices hold that line: the agent
+has only read-only tools (`search_flights`, `web_search`, both reaching external providers with
+the trip's own parameters), and the one operation that mutates state and crosses an identity
+boundary — booking — is not an agent tool at all. It lives behind the REST state machine, where
+each transition is re-verified by `admit_booking_route(..., require_mfa=True)`. The dangerous
+capability sits outside the loop, so the loop has nothing worth attacking.
+
+The consequence is explicit: the agent loop is a least-privilege sandbox bounded by *capability*,
+not a continuously-verified zero-trust zone. This equivalence depends on the tool set staying
+read-only. The day the agent gains a tool that writes state or reads another tenant's data, the
+boundary has to move inward — the `SecurityContext` must be threaded into `PlannerDeps` and each
+tool call re-authorized against the caller — or that tool must stay outside the loop behind its
+own admission check, the way booking does. Adding per-tool-call authorization today, for two
+read-only tools, would guard a blast radius that does not exist.
+
+### Why the harness exists
+
+The durable workflow around the loop is a reliability layer, not a trust layer. It earns its place
+through crash recovery (DBOS replays checkpointed Cerebras, flight, and activity steps from
+Postgres instead of re-charging the providers), a concurrency slot that bounds simultaneous LLM
+runs against the provider rate limit, and the execution-event trail that records what the agent
+did. None of those are security controls; the security controls are the two boundaries above.
 
 The backend is a single FastAPI process. The frontend is a separate static SPA that talks to it
 over REST; there is no server-rendered coupling between them.
@@ -92,9 +175,9 @@ tool-calling loop, and separate browser interface. See "Why this stack, as a who
 - **Visible UI:** React SPA with a live tool-call feed and an execution panel (see below).
 - **HITL booking:** explicit confirm-then-execute clicks gate the booking handoff;
   see "HITL booking" below for what "execute" does and doesn't do.
-- **Slack HITL connector:** an optional, DB-toggled Slack approval message with
-  Confirm/Reject buttons offers the same gate through Slack instead of the UI; see "Slack HITL
-  connector" below.
+- **Legacy Slack HITL connector:** with enforcement disabled for local development, an optional,
+  DB-toggled Slack message offers the same state-machine transition through Confirm/Reject
+  buttons; see "Slack HITL connector" below.
 
 ## Architectural patterns
 
@@ -126,10 +209,8 @@ Five patterns are used explicitly. This section maps each pattern to the code;
    this application does not perform. `execute_booking` separates the external fetch from the
    state transition, leaving a clear extension point if the workflow grows.
 
-`FlightSearchService`/`ExecutionService` (see "Flight search and execution-run lifecycle are
-extracted services" in DECISIONS.md) are a sixth, smaller pattern in the same family — extracting
-duplicated logic behind one interface — but weren't part of the original five; they're a
-refactor-era addition once the duplication became real, not a pattern picked up front.
+`FlightSearchService` is a smaller pattern in the same family: it extracts duplicated flight
+search behavior shared by the route and planner tool.
 
 ## APIs & AI protocols
 
@@ -140,7 +221,7 @@ refactor-era addition once the duplication became real, not a pattern picked up 
 | Cerebras (`gpt-oss-120b`) | The planner LLM — reasoning, tool selection, structured output. | Pydantic AI `CerebrasModel`/`CerebrasProvider` in `planner.py`. |
 | SearchApi.io Google Flights | Flight offers and booking-option links in live mode. | `flights_searchapi.py` (Live vs Recorded strategy). |
 | Tavily | Activity-search results with source URLs. | `activities_tavily.py`. |
-| Slack (optional) | Approval message with Confirm/Reject buttons; signed callback. | `slack_hitl.py` + `routes/slack.py`. |
+| Slack (development only) | Legacy approval message and signed callback, unavailable under enforcement. | `slack_hitl.py` + `routes/slack.py`. |
 
 **AI protocols:**
 
@@ -158,8 +239,9 @@ refactor-era addition once the duplication became real, not a pattern picked up 
   total_tokens_limit=MAX_CONTEXT_TOKENS, request_limit=MAX_REQUESTS_PER_RUN)` bounds each loop.
   `UsageLimitExceeded` is mapped to `PlanTooComplexOut` ("too complex for one pass"). Other
   provider and application failures are not covered by that fallback.
-- **Rate limiting** — a per-IP request cap (`RATE_LIMIT_MAX_REQUESTS=10`/
-  `RATE_LIMIT_WINDOW_SECONDS=60` in `app/rate_limit.py`) gates the planning and flight-search
+- **Rate limiting** — a verified-device request cap with a client-IP fallback
+  (`RATE_LIMIT_MAX_REQUESTS=10`/`RATE_LIMIT_WINDOW_SECONDS=60` in `app/rate_limit.py`)
+  gates the planning and flight-search
   routes, `POST /api/trips/{trip_id}/plan` and `POST /api/trips/{trip_id}/flights/search`, separate
   from the `MAX_CONCURRENT_AGENT_RUNS` concurrency slot above: the concurrency slot caps
   simultaneous LLM calls, while this caps request *volume* as observed by one process. The limiter
@@ -180,7 +262,7 @@ refactor-era addition once the duplication became real, not a pattern picked up 
 (`get_or_create_itinerary` returns an existing `Itinerary` row as-is). Otherwise it calls
 `run_planner_durable` (`app/dbos_runtime.py`), which acquires a concurrency slot
 (`acquire_agent_run_slot`, caps concurrent real LLM calls) and runs the `@DBOS.workflow`-wrapped
-planner: `ExecutionService(session).start_run(...)` binds an `ExecutionRun` for the trip, then
+planner: `execution_context(...)` binds an `AgentRun` for the trip, then
 `agent.iter(...)` drives a ReAct-style loop over `search_flights`/`web_search`, capped by
 `MAX_TOOL_STEPS`/`MAX_CONTEXT_TOKENS`. The agent's own structured output is `ItineraryOut |
 ClarificationOut` — a `ClarificationOut` returns questions without persisting an itinerary; an
@@ -190,11 +272,10 @@ catches `UsageLimitExceeded` around that call and turns it into a `PlanTooComple
   return is the wider
 `PlannerOutput` union (`ItineraryOut | ClarificationOut | PlanTooComplexOut`, `app/schemas.py`).
 Every tool call records an `ExecutionEvent`
-through the bound run, and `ExecutionRun.persist_result` (wrapping `persist_agent_run`) derives
-`AgentRun`/`AgentRunStep` rows from captured message history and usage on both the success and
-handled crash-recovery failure paths — `ExecutionService`/`ExecutionRun`
-(`app/agent/execution_log.py`) is the one place that finalizes a run, so there's exactly one
-finalization path to reason about, not two. The concurrency slot releases in a `finally`, outside
+through the bound context. The execution-recording module owns run creation and finalization;
+`finish_planner_run` derives steps from captured message history and records usage on both
+success and handled failure paths. Flight search uses the same `finish_run` implementation for
+status, timing, and step persistence. The concurrency slot releases in a `finally`, outside
 the DBOS-wrapped call — see [DECISIONS.md](DECISIONS.md) for why that placement matters.
 `POST /api/trips/{trip_id}/flights/search` (outside the agent loop) still binds its own run through
 the lower-level `execution_context()` directly, since it isn't wrapped in a DBOS workflow.
@@ -216,7 +297,7 @@ user-scoped) backs the sibling "Your trips" tab, filtered client-side by a date-
 
 Five core tables (`user_account`, `trip_request`, `flight_search_result`, `itinerary`,
 `hitl_booking_log`), one connector-config table (`connector_setting` — a single-row, DB-backed
-toggle so the Slack connector can be flipped at runtime without a restart), and four
+toggle for the legacy development-only Slack connector), and four
 audit/observability tables (`booking_transition`, `execution_event`, `agent_run`, `agent_run_step`)
 in `app/models.py`. `booking_transition` and `execution_event` are append-only, enforced by a
 Postgres trigger (`reject_audit_row_mutation()`) — `UPDATE`/`DELETE` raises at the database level
@@ -244,20 +325,22 @@ for this project; see [DECISIONS.md](DECISIONS.md).
 
 ## Slack HITL connector (`app/adapters/slack_hitl.py`, `app/routes/slack.py`, `app/routes/connectors.py`)
 
-Optional, off by default. `GET /api/connectors` reads and `PATCH /api/connectors/slack` flips the
-single-row `connector_setting.slack_enabled` toggle, gated so it can only be enabled when
-`SLACK_BOT_TOKEN`/`SLACK_SIGNING_SECRET`/`SLACK_APPROVALS_CHANNEL_ID` are all configured (409
-otherwise). The frontend's Connectors tab (`ConnectorsPanel.tsx`) drives this toggle.
+Legacy development path, off by default and unavailable whenever `ZERO_TRUST_ENFORCED=true`.
+With enforcement disabled, `GET /api/connectors` reads and `PATCH /api/connectors/slack` flips the
+single-row `connector_setting.slack_enabled` toggle. Enabling it also requires
+`SLACK_BOT_TOKEN`/`SLACK_SIGNING_SECRET`/`SLACK_APPROVALS_CHANNEL_ID` (409 otherwise). Connector
+settings are deployment-wide rather than tenant-owned. Under enforcement, both endpoints still
+require the `security-operator` or `admin` role and verified MFA, but the connector remains
+unavailable. The frontend's Connectors tab (`ConnectorsPanel.tsx`) drives this toggle.
 
-When enabled, `request_booking` (`routes/booking.py`) additionally posts a Confirm/Reject Block
-Kit message via `notify_pending_approval`; Slack's callback hits `POST /api/slack/interactions`,
-which verifies the request signature (stdlib `hmac`, constant-time compare) before resolving to
-the same `confirm_booking`/`reject_booking` repository calls the in-app buttons use — Slack is an
-alternate front door to the identical state machine, not a second one. Slack's Interactivity
-config requires a public HTTPS URL for that callback, so local development tunnels the backend
-with `ngrok http 8000`. See [SLACK_SETUP.md](SLACK_SETUP.md) for setup and
-[DECISIONS.md](DECISIONS.md) for why this is a hand-rolled adapter instead of a third-party chat
-SDK.
+In development mode, an enabled connector makes `request_booking` (`routes/booking.py`) post a
+Confirm/Reject Block Kit message via `notify_pending_approval`. Slack's callback hits
+`POST /api/slack/interactions`, verifies the request signature (stdlib `hmac`, constant-time
+compare), then resolves to the same `confirm_booking`/`reject_booking` repository calls as the
+in-app buttons. Under enforcement, the shared availability check rejects the callback and prevents
+notifications and enablement because Slack users are not mapped to application sessions, owners,
+roles, or MFA. See [SLACK_SETUP.md](SLACK_SETUP.md) for local setup and
+[DECISIONS.md](DECISIONS.md) for the adapter decision.
 
 ## Agent Execution Panel
 

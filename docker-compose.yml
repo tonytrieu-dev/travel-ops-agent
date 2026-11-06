@@ -9,7 +9,7 @@ services:
       POSTGRES_PASSWORD: travel_agent
       POSTGRES_DB: travel_agent
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - travel_agent_pgdata:/var/lib/postgresql/data
     healthcheck:

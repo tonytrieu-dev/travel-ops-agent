@@ -113,6 +113,7 @@ export function ApprovalHistoryPanel({ trips, isRunActive }: ApprovalHistoryPane
   const { data, errorMessage } = usePolledResource<BookingLogOut[]>({
     fetcher: listBookings,
     isRunActive,
+    resourceKey: "approval-history",
     errorText: "Could not load approval history.",
   })
   // Memoized so the `?? []` fallback doesn't hand useMemo a fresh array on every render.

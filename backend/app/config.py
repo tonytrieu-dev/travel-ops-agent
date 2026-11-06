@@ -5,14 +5,30 @@ Every tunable the agent and adapters rely on lives here as a named constant — 
 numbers scattered through the codebase.
 """
 
+import re
+import secrets
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import SecretStr, computed_field
+from baml_sdk import get_baml_source_files
+from pydantic import Field, SecretStr, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Cerebras runs gpt-oss-120b directly and keeps clean JSON tool-calls for Pydantic AI.
-CEREBRAS_MODEL = "gpt-oss-120b"
+
+def load_planner_client() -> tuple[str, str, str]:
+    source = get_baml_source_files()["travel_planner.baml"]
+    match = re.search(
+        r'client Cerebras = openai\.GenericClient\.new\(\s*'
+        r'model\s*=\s*"([^"]+)",\s*base_url\s*=\s*"([^"]+)",\s*'
+        r'api_key\s*=\s*env\.([A-Z_][A-Z_0-9]*),\s*\);',
+        source,
+    )
+    if match is None:
+        raise RuntimeError("Unsupported BAML Cerebras client definition; update the runtime loader")
+    return match[1], match[2], match[3]
+
+
+CEREBRAS_MODEL, CEREBRAS_BASE_URL, CEREBRAS_API_KEY_ENVIRONMENT = load_planner_client()
 GEMINI_JUDGE_MODEL = "gemini-3.6-flash"
 
 SEARCHAPI_BASE_URL = "https://www.searchapi.io/api/v1/search"
@@ -79,14 +95,13 @@ FLIGHT_CACHE_TTL_MINUTES = 15
 LLM_INPUT_PRICE_PER_MILLION_TOKENS = 0.59
 LLM_OUTPUT_PRICE_PER_MILLION_TOKENS = 0.79
 
-# No auth yet: every request acts as this one fixed user. get_current_user() is the single seam
-# that will start resolving a real identity later — route handlers never read this directly.
+# The identity fallback is used only when security enforcement is disabled for development.
 DEMO_USER_EMAIL = "tonytrieu.dev@gmail.com"
 
 # Cap concurrent agent runs so a burst can't blow through the LLM provider's rate limits.
 MAX_CONCURRENT_AGENT_RUNS = 2
 
-# Per-IP request cap on the expensive routes (/plan, /flights/search) — both spend real,
+# Per-client request cap on the expensive routes (/plan, /flights/search) — both spend real,
 # scarce third-party quota (LLM requests, the one-time SearchApi search allotment).
 RATE_LIMIT_MAX_REQUESTS = 10
 RATE_LIMIT_WINDOW_SECONDS = 60
@@ -94,10 +109,10 @@ RATE_LIMIT_WINDOW_SECONDS = 60
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=(".env", "../.env"), env_file_encoding="utf-8", extra="ignore"
+        env_file=(".env", "../.env"), env_file_encoding="utf-8", extra="ignore", populate_by_name=True
     )
 
-    cerebras_api_key: SecretStr
+    cerebras_api_key: SecretStr = Field(validation_alias=CEREBRAS_API_KEY_ENVIRONMENT)
     gemini_api_key: SecretStr | None = None
     searchapi_api_key: SecretStr
     tavily_api_key: SecretStr
@@ -105,16 +120,40 @@ class Settings(BaseSettings):
 
     use_live_flight_api: bool = True
     frontend_origin: str = "http://localhost:5173"
+    # Zero-trust enforcement is the default posture — "never trust, always verify" is not a
+    # toggle. Set ZERO_TRUST_ENFORCED=false only for the legacy trip/booking tests that predate
+    # the auth boundary and exercise route behavior, not identity.
+    zero_trust_enforced: bool = True
+    # No explicit secret -> a fresh per-process key, so an out-of-the-box run is enforced AND
+    # unforgeable (nothing in the repo can sign a valid token). A real deployment sets an explicit
+    # secret so tokens survive a restart and are shared across processes.
+    zero_trust_signing_secret: SecretStr = Field(
+        default_factory=lambda: SecretStr(secrets.token_urlsafe(32))
+    )
+
+    device_gateway_secret: SecretStr | None = None
 
     slack_bot_token: SecretStr | None = None
     slack_signing_secret: SecretStr | None = None
     slack_approvals_channel_id: str | None = None
 
+    # No DSN -> Sentry stays off, so local runs and tests need no Sentry project.
+    sentry_dsn: SecretStr | None = None
     @computed_field
     @property
     def dbos_database_url(self) -> str:
         """DBOS speaks the plain (psycopg/sync) Postgres URL, not the asyncpg dialect."""
         return self.database_url.replace("postgresql+asyncpg://", "postgresql://")
+
+    @model_validator(mode="after")
+    def _reject_weak_signing_secret(self) -> "Settings":
+        signing_secret = self.zero_trust_signing_secret.get_secret_value()
+        if self.zero_trust_enforced and len(signing_secret.encode()) < 32:
+            raise ValueError(
+                "ZERO_TRUST_SIGNING_SECRET must be at least 32 bytes when "
+                "ZERO_TRUST_ENFORCED is enabled"
+            )
+        return self
 
 
 @lru_cache

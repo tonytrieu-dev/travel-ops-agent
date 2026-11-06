@@ -4,6 +4,13 @@ One-time steps to enable the optional Slack approval connector. Nothing here is 
 the app to run — without these env vars, the Connectors tab shows the Slack toggle greyed out
 and the app behaves exactly as it does today.
 
+This legacy connector is available only in isolated development with
+`ZERO_TRUST_ENFORCED=false`. Under enforcement, callbacks return 401, notifications do not post,
+and the connector reports unavailable even when credentials and an old enabled toggle exist.
+Use the app's authenticated approval flow. Slack signatures prove the callback came from Slack;
+they do not establish the clicking user's trip ownership, role, or MFA. Those checks and accurate
+actor attribution must be implemented before Slack approvals can be enabled under enforcement.
+
 To configure a workspace:
 
 1. Create an app at <https://api.slack.com/apps> in your workspace.

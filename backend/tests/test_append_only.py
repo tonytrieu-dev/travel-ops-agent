@@ -10,7 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import BookingTransition, ExecutionEvent, ExecutionEventKind
+from app.models import BookingTransition, ComplianceAssessment, ExecutionEvent, ExecutionEventKind, SecurityEvent, utcnow
 from app.state import BookingState
 from tests.db_helpers import get_booking, run_db, seed_booking
 
@@ -48,11 +48,41 @@ async def _seed_event(session: AsyncSession) -> int:
     return event.id
 
 
+async def _seed_security_event(session: AsyncSession) -> int:
+    event = SecurityEvent(
+        tenant_id="tenant-a",
+        device_id="device-a",
+        source_segment="web",
+        target_segment="api",
+        action="test",
+        resource="test",
+        decision="allow",
+        reason="test",
+        correlation_id="correlation-test",
+    )
+    session.add(event)
+    await session.flush()
+    assert event.id is not None
+    return event.id
+
+
+async def _seed_assessment(session: AsyncSession) -> int:
+    assessment = ComplianceAssessment(
+        tenant_id="tenant-a", evaluator_version="1", window_start=utcnow(), window_end=utcnow(), results=[],
+    )
+    session.add(assessment)
+    await session.flush()
+    assert assessment.id is not None
+    return assessment.id
+
+
 @pytest.mark.parametrize(
     ("table", "seed", "column", "original"),
     [
         ("booking_transition", _seed_transition, "reason", "confirm"),
         ("execution_event", _seed_event, "status", "ok"),
+        ("security_event", _seed_security_event, "reason", "test"),
+        ("compliance_assessment", _seed_assessment, "evaluator_version", "1"),
     ],
 )
 def test_audit_rows_are_append_only(
@@ -86,3 +116,16 @@ def test_audit_rows_are_append_only(
     assert surviving == original, (
         f"{table}.{column} was mutated despite the append-only trigger (got {surviving!r})"
     )
+
+
+@pytest.mark.parametrize("table,seed", [
+    ("security_event", _seed_security_event), ("booking_transition", _seed_transition),
+    ("execution_event", _seed_event), ("compliance_assessment", _seed_assessment),
+])
+def test_audit_tables_cannot_be_truncated(table, seed) -> None:
+    row_id = run_db(seed)
+    with pytest.raises(DBAPIError, match="(?i)append-only"):
+        run_db(lambda session: session.execute(text(f"TRUNCATE {table} CASCADE")))
+    assert run_db(lambda session: session.scalar(
+        text(f"SELECT id FROM {table} WHERE id = :row_id"), {"row_id": row_id}
+    )) == row_id

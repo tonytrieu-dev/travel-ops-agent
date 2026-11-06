@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 from typing import Literal
 
+from openai import AsyncOpenAI
 from pydantic_ai import Agent, ModelRetry, RunContext, ToolOutput
 from pydantic_ai.messages import ModelMessage, ToolReturnPart
 from pydantic_ai.models.cerebras import CerebrasModel
@@ -16,6 +17,7 @@ from app.adapters.flights_searchapi import FlightProvider
 from app.agent.execution_log import current_trip, record_event
 from app.agent.prompts import load_system_prompt, sanitize_web_content
 from app.config import (
+    CEREBRAS_BASE_URL,
     CEREBRAS_MODEL,
     MAX_CONTEXT_TOKENS,
     MAX_OUTPUT_RETRIES,
@@ -153,7 +155,12 @@ def _build_agent() -> Agent[PlannerDeps, ItineraryOut | ClarificationOut]:
     settings = get_settings()
     model = CerebrasModel(
         CEREBRAS_MODEL,
-        provider=CerebrasProvider(api_key=settings.cerebras_api_key.get_secret_value()),
+        provider=CerebrasProvider(
+            openai_client=AsyncOpenAI(
+                api_key=settings.cerebras_api_key.get_secret_value(),
+                base_url=CEREBRAS_BASE_URL,
+            ),
+        ),
     )
     built_agent = Agent(
         model,
@@ -237,6 +244,8 @@ def reject_ungrounded_itinerary(
     structural enforcement of "never fabricate an activity" (the prompt alone doesn't hold)."""
     if not isinstance(output, ItineraryOut):
         return output
+    if not output.days:
+        raise ModelRetry("The itinerary has no days. Return a day-by-day plan for this trip.")
     grounded = _web_search_urls(ctx.messages)
     ungrounded = [
         activity.source_url

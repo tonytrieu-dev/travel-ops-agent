@@ -1,0 +1,11 @@
+.git
+.env
+.device-certificates
+**/node_modules
+**/.venv
+**/__pycache__
+frontend/dist
+.agents
+.claude
+agent
+transcript.json
